@@ -1,0 +1,24 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GNU Radio dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            gnuradio gr-osmosdr python3-numpy python3-pyqt5
+      - name: Compile Python sources
+        run: python3 -m py_compile frs_all_channels.py tests/test_web_dashboard.py
+      - name: Run tests
+        run: python3 -m unittest tests.test_web_dashboard

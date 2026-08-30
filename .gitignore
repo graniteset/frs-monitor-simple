@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Codex/local workspace state
+.agents/
+.codex/
+outputs/
+work/
+
+# Receiver output and generated fixtures
+recordings/
+sessions/
+*.frs-session/
+*.cf32
+*.iq
+*.wav
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Editor and OS files
+.DS_Store
+*.swp
+*.swo
+*~
