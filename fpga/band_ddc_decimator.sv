@@ -112,7 +112,7 @@ module band_ddc_decimator #(
         input [PTR_W-1:0] offset;
         integer address;
         begin
-            address = integer'(head) - integer'(offset);
+            address = $signed({1'b0, head}) - $signed({1'b0, offset});
             if (address < 0)
                 address = address + TAPS;
             wrap_history_addr = PTR_W'(address);
