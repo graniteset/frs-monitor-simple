@@ -30,19 +30,23 @@ module frs_multi_channel_audio #(
     localparam integer TAP_AW = $clog2(AUDIO_TAPS);
     localparam integer HIST_AW = $clog2(HISTORY_SIZE);
     localparam integer AUDIO_HIST_ADDR_W = $clog2(CHANNELS * HISTORY_SIZE);
-    localparam [3:0] FRONT_IDLE = 4'd0;
-    localparam [3:0] FRONT_SQUARE = 4'd1;
-    localparam [3:0] FRONT_POWER = 4'd2;
-    localparam [3:0] FRONT_DISC_MUL = 4'd3;
-    localparam [3:0] FRONT_DISC_SUM = 4'd4;
-    localparam [3:0] FRONT_CORDIC_INIT = 4'd5;
-    localparam [3:0] FRONT_CORDIC = 4'd6;
-    localparam [3:0] FRONT_FM_SCALE = 4'd7;
-    localparam [3:0] FRONT_DEEMPH_MUL = 4'd8;
-    localparam [3:0] FRONT_DEEMPH_SUM0 = 4'd9;
-    localparam [3:0] FRONT_DEEMPH_SUM1 = 4'd10;
-    localparam [3:0] FRONT_DEEMPH_QUANT = 4'd11;
-    localparam [3:0] FRONT_FIFO_WRITE = 4'd12;
+    localparam [4:0] FRONT_IDLE = 5'd0;
+    localparam [4:0] FRONT_SQUARE = 5'd1;
+    localparam [4:0] FRONT_POWER = 5'd2;
+    localparam [4:0] FRONT_DISC_MUL = 5'd3;
+    localparam [4:0] FRONT_DISC_SUM = 5'd4;
+    localparam [4:0] FRONT_CORDIC_INIT = 5'd5;
+    localparam [4:0] FRONT_CORDIC = 5'd6;
+    localparam [4:0] FRONT_FM_SCALE = 5'd7;
+    localparam [4:0] FRONT_DEEMPH_MUL = 5'd8;
+    localparam [4:0] FRONT_DEEMPH_SUM0 = 5'd9;
+    localparam [4:0] FRONT_DEEMPH_SUM1 = 5'd10;
+    localparam [4:0] FRONT_DEEMPH_QUANT = 5'd11;
+    localparam [4:0] FRONT_FIFO_WRITE = 5'd12;
+    localparam [4:0] FRONT_POWER_DELTA = 5'd13;
+    localparam [4:0] FRONT_POWER_EMA = 5'd14;
+    localparam [4:0] FRONT_POWER_NEXT = 5'd15;
+    localparam [4:0] FRONT_POWER_GATE = 5'd16;
     localparam [2:0] FIR_IDLE = 3'd0;
     localparam [2:0] FIR_MAC = 3'd1;
     localparam [2:0] FIR_DRAIN = 3'd2;
@@ -51,7 +55,7 @@ module frs_multi_channel_audio #(
     localparam [2:0] FIR_GAIN_ROUND = 3'd5;
     localparam [2:0] FIR_OUTPUT = 3'd6;
 
-    reg [3:0] front_state;
+    reg [4:0] front_state;
     reg [2:0] fir_state;
 
     reg [32:0] power_average [0:CHANNELS-1];
@@ -99,6 +103,11 @@ module frs_multi_channel_audio #(
     reg signed [31:0] front_square_i;
     reg signed [31:0] front_square_q;
     reg [32:0] front_power_average;
+    reg [32:0] front_input_power;
+    reg signed [33:0] front_power_delta;
+    reg signed [33:0] front_power_update;
+    reg [32:0] front_power_next;
+    reg [32:0] front_threshold;
     reg signed [15:0] front_gated_i;
     reg signed [15:0] front_gated_q;
     reg signed [31:0] front_disc_ii;
@@ -131,16 +140,13 @@ module frs_multi_channel_audio #(
 
     wire [4:0] front_channel_safe = front_channel - 1'b1;
 
-    wire [32:0] input_power = {1'b0, front_square_i} + {1'b0, front_square_q};
-    wire signed [33:0] input_power_delta = $signed({1'b0, input_power}) -
-                                            $signed({1'b0, front_power_average});
-    wire signed [48:0] power_update_product = input_power_delta * 16'sd33;
-    wire signed [33:0] power_update = 34'($signed(power_update_product >>> 15));
-    wire signed [33:0] power_next_wide = $signed({1'b0, power_average[front_channel_safe]}) + power_update;
+    wire signed [48:0] power_update_product = front_power_delta * 16'sd33;
+    wire signed [33:0] power_next_wide = $signed({1'b0, front_power_average}) +
+                                         front_power_update;
     wire [32:0] power_next = (power_next_wide < 0) ? 33'd0 :
                              (power_next_wide > 34'sh1ffffffff) ? 33'h1ffffffff :
                              power_next_wide[32:0];
-    wire input_squelch_open = (power_next >= threshold_q30);
+    wire input_squelch_open = (front_power_next >= front_threshold);
     wire signed [15:0] gated_i = input_squelch_open ? front_i : 16'sd0;
     wire signed [15:0] gated_q = input_squelch_open ? front_q : 16'sd0;
 
@@ -298,6 +304,11 @@ module frs_multi_channel_audio #(
             front_square_i <= 32'sd0;
             front_square_q <= 32'sd0;
             front_power_average <= 33'd0;
+            front_input_power <= 33'd0;
+            front_power_delta <= 34'sd0;
+            front_power_update <= 34'sd0;
+            front_power_next <= 33'd0;
+            front_threshold <= 33'd0;
             front_gated_i <= 16'sd0;
             front_gated_q <= 16'sd0;
             front_disc_ii <= 32'sd0;
@@ -365,16 +376,16 @@ module frs_multi_channel_audio #(
                     front_i <= s_data[31:16];
                     front_q <= s_data[15:0];
                     front_decimated <= decimator_phase[input_channel_safe];
+                    front_threshold <= threshold_q30;
                     active_channel <= input_channel_safe;
                     active_decimated <= decimator_phase[input_channel_safe];
                     front_state <= FRONT_SQUARE;
                 end
             end
 
-            // Pipeline the channelizer-to-CORDIC front end. Separate stages
-            // keep sample selection, power/squelch, discriminator products,
-            // and dot/cross reduction from forming one long combinational
-            // path into the iterative CORDIC state registers.
+            // Pipeline the channelizer-to-CORDIC front end. Power estimation
+            // and squelch are deliberately split into short registered stages
+            // while the threshold and sample remain paired with this channel.
             if (front_state == FRONT_SQUARE) begin
                 front_square_i <= front_i * front_i;
                 front_square_q <= front_q * front_q;
@@ -383,7 +394,28 @@ module frs_multi_channel_audio #(
             end
 
             if (front_state == FRONT_POWER) begin
-                power_average[front_channel_safe] <= power_next;
+                front_input_power <= {1'b0, front_square_i} + {1'b0, front_square_q};
+                front_state <= FRONT_POWER_DELTA;
+            end
+
+            if (front_state == FRONT_POWER_DELTA) begin
+                front_power_delta <= $signed({1'b0, front_input_power}) -
+                                     $signed({1'b0, front_power_average});
+                front_state <= FRONT_POWER_EMA;
+            end
+
+            if (front_state == FRONT_POWER_EMA) begin
+                front_power_update <= 34'($signed(power_update_product >>> 15));
+                front_state <= FRONT_POWER_NEXT;
+            end
+
+            if (front_state == FRONT_POWER_NEXT) begin
+                front_power_next <= power_next;
+                front_state <= FRONT_POWER_GATE;
+            end
+
+            if (front_state == FRONT_POWER_GATE) begin
+                power_average[front_channel_safe] <= front_power_next;
                 front_gated_i <= gated_i;
                 front_gated_q <= gated_q;
                 front_state <= FRONT_DISC_MUL;
