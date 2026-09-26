@@ -16,7 +16,7 @@ module iq_test_source #(
     input  wire               m_axis_tready
 );
     localparam [32:0] PERIOD = ON_SAMPLES + OFF_SAMPLES;
-    localparam [32:0] ON_COUNT = {1'b0, ON_SAMPLES};
+    localparam [32:0] ON_COUNT = 33'(ON_SAMPLES);
     reg [31:0] phase;
     reg [32:0] burst_pos;
 
