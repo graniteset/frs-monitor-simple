@@ -20,29 +20,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y iverilog verilator yosys
 
-      - name: Run FPGA self-checking simulations
-        run: make fpga-test
-
       - name: Lint board-independent RTL
         run: |
-          verilator --lint-only --Wall -Wno-TIMESCALEMOD --top-module iq_test_source fpga/iq_test_source.sv
-          verilator --lint-only --Wall --top-module axis_iq_mux fpga/axis_iq_mux.sv
-          verilator --lint-only --Wall --top-module band_ddc_decimator fpga/band_ddc_decimator.sv
-          verilator --lint-only --Wall --top-module sparse_channelizer fpga/sparse_channelizer.sv
-          verilator --lint-only --Wall --top-module axis_rr_merge2_iq fpga/axis_rr_merge2_iq.sv
-          verilator --lint-only --Wall --top-module complex_squelch fpga/complex_squelch.sv
-          verilator --lint-only --Wall --top-module quadrature_demod fpga/quadrature_demod.sv
-          verilator --lint-only --Wall --top-module fm_deemphasis fpga/fm_deemphasis.sv
-          verilator --lint-only --Wall --top-module audio_fir_decimator fpga/audio_fir_decimator.sv
-          verilator --lint-only --Wall --top-module frs_channel_audio \
+          # Blocking assignments inside pure helper functions are intentional.
+          verilator --lint-only --Wall -Wno-BLKSEQ -Wno-TIMESCALEMOD --top-module iq_test_source fpga/iq_test_source.sv
+          verilator --lint-only --Wall -Wno-BLKSEQ --top-module axis_iq_mux fpga/axis_iq_mux.sv
+          verilator --lint-only --Wall -Wno-BLKSEQ --top-module band_ddc_decimator fpga/band_ddc_decimator.sv
+          verilator --lint-only --Wall -Wno-BLKSEQ --top-module sparse_channelizer fpga/sparse_channelizer.sv
+          verilator --lint-only --Wall -Wno-BLKSEQ --top-module axis_rr_merge2_iq fpga/axis_rr_merge2_iq.sv
+          verilator --lint-only --Wall -Wno-BLKSEQ --top-module complex_squelch fpga/complex_squelch.sv
+          verilator --lint-only --Wall -Wno-BLKSEQ --top-module quadrature_demod fpga/quadrature_demod.sv
+          verilator --lint-only --Wall -Wno-BLKSEQ --top-module fm_deemphasis fpga/fm_deemphasis.sv
+          verilator --lint-only --Wall -Wno-BLKSEQ --top-module audio_fir_decimator fpga/audio_fir_decimator.sv
+          verilator --lint-only --Wall -Wno-BLKSEQ --top-module frs_channel_audio \
             fpga/complex_squelch.sv fpga/quadrature_demod.sv fpga/fm_deemphasis.sv \
             fpga/audio_fir_decimator.sv fpga/frs_channel_audio.sv
-          verilator --lint-only --Wall -Wno-TIMESCALEMOD --top-module frs_multi_channel_audio \
+          verilator --lint-only --Wall -Wno-BLKSEQ -Wno-TIMESCALEMOD --top-module frs_multi_channel_audio \
             fpga/frs_multi_channel_audio.sv
-          verilator --lint-only --Wall -Wno-TIMESCALEMOD --top-module frs_receive_core \
+          verilator --lint-only --Wall -Wno-BLKSEQ -Wno-TIMESCALEMOD --top-module frs_receive_core \
             fpga/band_ddc_decimator.sv fpga/sparse_channelizer.sv fpga/axis_rr_merge2_iq.sv \
             fpga/frs_multi_channel_audio.sv fpga/frs_receive_core.sv
 
       - name: Check and report integrated hierarchy with Yosys
         run: |
           yosys -Q -p 'read_verilog -sv fpga/band_ddc_decimator.sv fpga/sparse_channelizer.sv fpga/axis_rr_merge2_iq.sv fpga/frs_multi_channel_audio.sv fpga/frs_receive_core.sv; hierarchy -check -top frs_receive_core; proc; opt; check; stat'
+
+      - name: Run FPGA self-checking simulations
+        run: make fpga-test
