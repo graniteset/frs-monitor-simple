@@ -7,10 +7,6 @@ module tb_band_ddc #(
     localparam integer TOLERANCE_LSB = 6;
     localparam [8:0] PHASE_STEP = BAND2 ? 9'd311 : 9'd199;
     localparam [8:0] INITIAL_PHASE = BAND2 ? 9'd490 : 9'd330;
-    localparam INPUT_FILE = BAND2 ? "fpga/vectors/ddc_band2_input.memh" :
-                                     "fpga/vectors/ddc_input.memh";
-    localparam EXPECTED_FILE = BAND2 ? "fpga/vectors/ddc_band2_expected.memh" :
-                                         "fpga/vectors/ddc_expected.memh";
 
     reg clk;
     initial begin
@@ -51,8 +47,15 @@ module tb_band_ddc #(
     integer timeout_cycles = 0;
 
     initial begin
-        $readmemh(INPUT_FILE, input_mem);
-        $readmemh(EXPECTED_FILE, expected_mem);
+        // Icarus 12 (Ubuntu 24.04) cannot pass a parameterized string to
+        // $readmemh, even when the expression is constant after elaboration.
+        if (BAND2) begin
+            $readmemh("fpga/vectors/ddc_band2_input.memh", input_mem);
+            $readmemh("fpga/vectors/ddc_band2_expected.memh", expected_mem);
+        end else begin
+            $readmemh("fpga/vectors/ddc_input.memh", input_mem);
+            $readmemh("fpga/vectors/ddc_expected.memh", expected_mem);
+        end
     end
 
     always @(negedge clk) begin
