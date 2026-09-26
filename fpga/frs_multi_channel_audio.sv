@@ -43,11 +43,16 @@ module frs_multi_channel_audio #(
     localparam [3:0] FRONT_DEEMPH_SUM1 = 4'd10;
     localparam [3:0] FRONT_DEEMPH_QUANT = 4'd11;
     localparam [3:0] FRONT_FIFO_WRITE = 4'd12;
-    localparam [1:0] FIR_IDLE = 2'd0;
-    localparam [1:0] FIR_MAC = 2'd1;
+    localparam [2:0] FIR_IDLE = 3'd0;
+    localparam [2:0] FIR_MAC = 3'd1;
+    localparam [2:0] FIR_DRAIN = 3'd2;
+    localparam [2:0] FIR_SCALE = 3'd3;
+    localparam [2:0] FIR_GAIN = 3'd4;
+    localparam [2:0] FIR_GAIN_ROUND = 3'd5;
+    localparam [2:0] FIR_OUTPUT = 3'd6;
 
     reg [3:0] front_state;
-    reg [1:0] fir_state;
+    reg [2:0] fir_state;
 
     reg [32:0] power_average [0:CHANNELS-1];
     reg signed [15:0] previous_i [0:CHANNELS-1];
@@ -70,6 +75,17 @@ module frs_multi_channel_audio #(
     reg [TAP_AW:0] audio_history_count [0:CHANNELS-1];
     reg [HIST_AW-1:0] fir_head;
     reg [TAP_AW:0] fir_valid_count;
+    reg signed [15:0] fir_sample_stage;
+    reg signed [17:0] fir_tap_stage;
+    reg fir_input_pipe_valid;
+    reg fir_input_pipe_last;
+    reg signed [33:0] fir_product_stage;
+    reg fir_product_valid;
+    reg fir_product_last;
+    reg signed [41:0] fir_final_accumulator;
+    reg signed [15:0] fir_gain_input;
+    reg signed [31:0] fir_gain_product;
+    reg signed [17:0] fir_gain_scaled;
 
     reg [4:0] active_channel;
     reg active_decimated;
@@ -222,8 +238,8 @@ module frs_multi_channel_audio #(
         AUDIO_HIST_ADDR_W'(audio_write_pointer[fifo_channel_current]);
     wire fir_sample_valid = {1'b0, fir_tap_index} < fir_valid_count;
     wire signed [15:0] fir_sample = fir_sample_valid ? audio_history[fir_flat_address] : 16'sd0;
-    wire signed [33:0] fir_product = fir_sample * audio_taps[fir_tap_index];
-    wire signed [41:0] fir_next_accumulator = fir_accumulator + {{8{fir_product[33]}}, fir_product};
+    wire signed [33:0] fir_product_next = fir_sample_stage * fir_tap_stage;
+    wire signed [41:0] fir_next_accumulator = fir_accumulator + {{8{fir_product_stage[33]}}, fir_product_stage};
 
     function [HIST_AW-1:0] wrap_audio_pointer;
         input [HIST_AW-1:0] pointer;
@@ -233,14 +249,14 @@ module frs_multi_channel_audio #(
         end
     endfunction
 
-    wire signed [31:0] audio_gain_product = q32_to_q15(fir_next_accumulator) * CHANNEL_GAIN_Q15;
-    wire signed [32:0] audio_gain_rounded = (audio_gain_product >= 0) ?
-                                             ($signed(audio_gain_product) + 33'sd16384) :
-                                             ($signed(audio_gain_product) - 33'sd16384);
-    wire signed [17:0] audio_gain_scaled = 18'($signed(audio_gain_rounded) >>> 15);
-    wire signed [15:0] audio_gain_output = (audio_gain_scaled > 18'sd32767) ? 16'sd32767 :
-                                           (audio_gain_scaled < -18'sd32768) ? -16'sd32768 :
-                                           audio_gain_scaled[15:0];
+    wire signed [31:0] audio_gain_product_next = fir_gain_input * CHANNEL_GAIN_Q15;
+    wire signed [32:0] audio_gain_rounded = (fir_gain_product >= 0) ?
+                                             ($signed(fir_gain_product) + 33'sd16384) :
+                                             ($signed(fir_gain_product) - 33'sd16384);
+    wire signed [17:0] audio_gain_scaled_next = 18'($signed(audio_gain_rounded) >>> 15);
+    wire signed [15:0] audio_gain_output = (fir_gain_scaled > 18'sd32767) ? 16'sd32767 :
+                                           (fir_gain_scaled < -18'sd32768) ? -16'sd32768 :
+                                           fir_gain_scaled[15:0];
 
     initial $readmemh(AUDIO_TAPS_FILE, audio_taps);
 
@@ -254,6 +270,18 @@ module frs_multi_channel_audio #(
             audio_history[fifo_write_flat_address] <=
                 fifo_sample_current;
         end
+    end
+
+    // Register the history lookup and DSP product before the accumulator.
+    // The final accumulator, normalization, gain, rounding, and output stages
+    // are sequenced separately by the FIR state machine below.
+    always @(posedge aclk) begin
+        if (fir_state == FIR_MAC) begin
+            fir_sample_stage <= fir_sample;
+            fir_tap_stage <= audio_taps[fir_tap_index];
+        end
+        if (fir_input_pipe_valid)
+            fir_product_stage <= fir_product_next;
     end
 
     integer reset_channel;
@@ -298,6 +326,14 @@ module frs_multi_channel_audio #(
             fir_valid_count <= {(TAP_AW+1){1'b0}};
             fir_tap_index <= {TAP_AW{1'b0}};
             fir_accumulator <= 42'sd0;
+            fir_input_pipe_valid <= 1'b0;
+            fir_input_pipe_last <= 1'b0;
+            fir_product_valid <= 1'b0;
+            fir_product_last <= 1'b0;
+            fir_final_accumulator <= 42'sd0;
+            fir_gain_input <= 16'sd0;
+            fir_gain_product <= 32'sd0;
+            fir_gain_scaled <= 18'sd0;
             m_data <= 21'd0;
             m_valid <= 1'b0;
             invalid_channel <= 1'b0;
@@ -312,6 +348,12 @@ module frs_multi_channel_audio #(
                 audio_history_count[reset_channel] <= {(TAP_AW+1){1'b0}};
             end
         end else begin
+            fir_input_pipe_valid <= (fir_state == FIR_MAC);
+            fir_input_pipe_last <= (fir_state == FIR_MAC) &&
+                                   (fir_tap_index == TAP_AW'(AUDIO_TAPS-1));
+            fir_product_valid <= fir_input_pipe_valid;
+            fir_product_last <= fir_input_pipe_last;
+
             if (m_valid && m_ready)
                 m_valid <= 1'b0;
 
@@ -446,15 +488,43 @@ module frs_multi_channel_audio #(
                 end else begin
                     fir_state <= FIR_IDLE;
                 end
-            end else if (fir_state == FIR_MAC) begin
-                fir_accumulator <= fir_next_accumulator;
+            end
+
+            if (fir_state == FIR_MAC) begin
                 if (fir_tap_index == TAP_AW'(AUDIO_TAPS-1)) begin
-                    m_data <= {fir_channel + 5'd1, audio_gain_output};
-                    m_valid <= 1'b1;
-                    fir_state <= FIR_IDLE;
+                    fir_state <= FIR_DRAIN;
                 end else begin
                     fir_tap_index <= fir_tap_index + 1'b1;
                 end
+            end
+
+            if (fir_product_valid) begin
+                fir_accumulator <= fir_next_accumulator;
+                if (fir_product_last) begin
+                    fir_final_accumulator <= fir_next_accumulator;
+                    fir_state <= FIR_SCALE;
+                end
+            end
+
+            if (fir_state == FIR_SCALE) begin
+                fir_gain_input <= q32_to_q15(fir_final_accumulator);
+                fir_state <= FIR_GAIN;
+            end
+
+            if (fir_state == FIR_GAIN) begin
+                fir_gain_product <= audio_gain_product_next;
+                fir_state <= FIR_GAIN_ROUND;
+            end
+
+            if (fir_state == FIR_GAIN_ROUND) begin
+                fir_gain_scaled <= audio_gain_scaled_next;
+                fir_state <= FIR_OUTPUT;
+            end
+
+            if (fir_state == FIR_OUTPUT) begin
+                m_data <= {fir_channel + 5'd1, audio_gain_output};
+                m_valid <= 1'b1;
+                fir_state <= FIR_IDLE;
             end
 
             case ({(front_state == FRONT_FIFO_WRITE), fifo_pop})

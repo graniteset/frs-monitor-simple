@@ -49,9 +49,18 @@ module band_ddc_decimator #(
     reg [PTR_W-1:0] tap_index;
     reg [DEC_W-1:0] decim_count;
     reg mac_busy;
+    reg mac_issue_active;
     reg mac_launch_pending;
+    reg [1:0] mac_output_state;
     reg signed [41:0] acc_i;
     reg signed [41:0] acc_q;
+    reg signed [15:0] mac_s0_sample_i, mac_s0_sample_q;
+    reg signed [17:0] mac_s0_tap;
+    reg mac_s0_valid, mac_s0_last;
+    reg signed [33:0] mac_s1_product_i, mac_s1_product_q;
+    reg mac_s1_valid, mac_s1_last;
+    reg signed [41:0] mac_final_acc_i, mac_final_acc_q;
+    reg signed [25:0] mac_output_scaled_i, mac_output_scaled_q;
 
     // Mixer pipeline metadata. A decimation-boundary sample is not allowed
     // to launch its FIR until its delayed mixer result has actually reached
@@ -123,10 +132,23 @@ module band_ddc_decimator #(
     wire history_sample_valid = {1'b0, tap_index} < mac_history_count;
     wire signed [15:0] history_sample_i = history_sample_valid ? history_i[history_addr] : 16'sd0;
     wire signed [15:0] history_sample_q = history_sample_valid ? history_q[history_addr] : 16'sd0;
-    wire signed [33:0] product_i = history_sample_i * taps[tap_index];
-    wire signed [33:0] product_q = history_sample_q * taps[tap_index];
-    wire signed [41:0] next_acc_i = acc_i + {{8{product_i[33]}}, product_i};
-    wire signed [41:0] next_acc_q = acc_q + {{8{product_q[33]}}, product_q};
+    wire signed [33:0] product_i_next = mac_s0_sample_i * mac_s0_tap;
+    wire signed [33:0] product_q_next = mac_s0_sample_q * mac_s0_tap;
+    wire signed [41:0] next_acc_i = acc_i + {{8{mac_s1_product_i[33]}}, mac_s1_product_i};
+    wire signed [41:0] next_acc_q = acc_q + {{8{mac_s1_product_q[33]}}, mac_s1_product_q};
+
+    wire signed [42:0] mac_rounded_i = (mac_final_acc_i >= 0) ?
+        (mac_final_acc_i + 43'sd65536) : (mac_final_acc_i - 43'sd65536);
+    wire signed [42:0] mac_rounded_q = (mac_final_acc_q >= 0) ?
+        (mac_final_acc_q + 43'sd65536) : (mac_final_acc_q - 43'sd65536);
+    wire signed [25:0] mac_scaled_i = 26'($signed(mac_rounded_i) >>> 17);
+    wire signed [25:0] mac_scaled_q = 26'($signed(mac_rounded_q) >>> 17);
+    wire signed [15:0] mac_output_i = (mac_output_scaled_i > 26'sd32767) ? 16'sd32767 :
+                                      (mac_output_scaled_i < -26'sd32768) ? -16'sd32768 :
+                                      mac_output_scaled_i[15:0];
+    wire signed [15:0] mac_output_q = (mac_output_scaled_q > 26'sd32767) ? 16'sd32767 :
+                                      (mac_output_scaled_q < -26'sd32768) ? -16'sd32768 :
+                                      mac_output_scaled_q[15:0];
 
     function signed [15:0] q32_to_q15;
         input signed [41:0] value;
@@ -188,6 +210,16 @@ module band_ddc_decimator #(
             history_i[mix_s4_ptr] <= mix_s4_i_saturated;
             history_q[mix_s4_ptr] <= mix_s4_q_saturated;
         end
+
+        if (mac_issue_active) begin
+            mac_s0_sample_i <= history_sample_i;
+            mac_s0_sample_q <= history_sample_q;
+            mac_s0_tap <= taps[tap_index];
+        end
+        if (mac_s0_valid) begin
+            mac_s1_product_i <= product_i_next;
+            mac_s1_product_q <= product_q_next;
+        end
     end
 
     always @(posedge aclk or negedge aresetn) begin
@@ -202,7 +234,17 @@ module band_ddc_decimator #(
             // zero, then advances by DECIMATION samples each output.
             decim_count <= DEC_LAST;
             mac_busy    <= 1'b0;
+            mac_issue_active <= 1'b0;
             mac_launch_pending <= 1'b0;
+            mac_output_state <= 2'd0;
+            mac_s0_valid <= 1'b0;
+            mac_s0_last <= 1'b0;
+            mac_s1_valid <= 1'b0;
+            mac_s1_last <= 1'b0;
+            mac_final_acc_i <= 42'sd0;
+            mac_final_acc_q <= 42'sd0;
+            mac_output_scaled_i <= 26'sd0;
+            mac_output_scaled_q <= 26'sd0;
             mix_s0_valid <= 1'b0;
             mix_s1_valid <= 1'b0;
             mix_s2_valid <= 1'b0;
@@ -219,6 +261,11 @@ module band_ddc_decimator #(
             m_valid     <= 1'b0;
             overrun     <= 1'b0;
         end else begin
+            mac_s0_valid <= mac_issue_active;
+            mac_s0_last <= mac_issue_active && (tap_index == 0);
+            mac_s1_valid <= mac_s0_valid;
+            mac_s1_last <= mac_s0_last;
+
             mix_s0_valid <= s_valid && s_ready;
             mix_s1_valid <= mix_s0_valid;
             mix_s2_valid <= mix_s1_valid;
@@ -261,6 +308,8 @@ module band_ddc_decimator #(
                 mac_launch_pending <= 1'b0;
                 if (!mac_busy) begin
                     mac_busy  <= 1'b1;
+                    mac_issue_active <= 1'b1;
+                    mac_output_state <= 2'd0;
                     mac_head  <= mix_s4_ptr;
                     mac_history_count <= mix_s4_history_count;
                     tap_index <= PTR_LAST;
@@ -271,17 +320,34 @@ module band_ddc_decimator #(
                 end
             end
 
-            if (mac_busy) begin
-                acc_i <= next_acc_i;
-                acc_q <= next_acc_q;
+            if (mac_issue_active) begin
                 if (tap_index == 0) begin
-                    m_i      <= q32_to_q15(next_acc_i);
-                    m_q      <= q32_to_q15(next_acc_q);
-                    m_valid  <= 1'b1;
-                    mac_busy <= 1'b0;
+                    mac_issue_active <= 1'b0;
                 end else begin
                     tap_index <= tap_index - 1'b1;
                 end
+            end
+
+            if (mac_s1_valid) begin
+                acc_i <= next_acc_i;
+                acc_q <= next_acc_q;
+                if (mac_s1_last) begin
+                    mac_final_acc_i <= next_acc_i;
+                    mac_final_acc_q <= next_acc_q;
+                    mac_output_state <= 2'd1;
+                end
+            end
+
+            if (mac_output_state == 2'd1) begin
+                mac_output_scaled_i <= mac_scaled_i;
+                mac_output_scaled_q <= mac_scaled_q;
+                mac_output_state <= 2'd2;
+            end else if (mac_output_state == 2'd2) begin
+                m_i <= mac_output_i;
+                m_q <= mac_output_q;
+                m_valid <= 1'b1;
+                mac_busy <= 1'b0;
+                mac_output_state <= 2'd0;
             end
         end
     end
