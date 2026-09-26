@@ -89,7 +89,7 @@ module sparse_channelizer #(
         (map_index == MAP_AW'(CHANNELS-1)) ? {MAP_AW{1'b0}} : map_index + 1'b1;
     wire [MAP_FILE_WIDTH-1:0] next_map_word = channel_map[next_map_index];
 
-    wire [12:0] coeff_addr0 = 13'(active_bin * TAPS + tap_index);
+    wire [12:0] coeff_addr0 = 13'(active_bin * TAPS + 32'(tap_index));
     wire [12:0] coeff_addr1 = coeff_addr0 + 13'd1;
     wire [35:0] coeff0 = modulated_taps[mac_addr_coeff0];
     wire [35:0] coeff1 = mac_addr_coeff1_valid ?
@@ -258,72 +258,3 @@ module sparse_channelizer #(
             mac_s2_valid <= mac_s1_valid;
             mac_s2_last <= mac_s1_last;
             mac_s3_valid <= mac_s2_valid;
-            mac_s3_last <= mac_s2_last;
-            mac_s4_valid <= mac_s3_valid;
-            mac_s4_last <= mac_s3_last;
-
-            if (s_valid && s_ready) begin
-                if (history_count < (HIST_AW+1)'(HISTORY_SIZE))
-                    history_count <= history_count + 1'b1;
-                write_index <= write_index + 1'b1;
-
-                if (frame_count == FRAME_AW'(FRAME_SAMPLES-1)) begin
-                    frame_count <= {FRAME_AW{1'b0}};
-                    if (state == ST_IDLE) begin
-                        frame_end_index     <= write_index;
-                        frame_history_count <= (history_count < (HIST_AW+1)'(HISTORY_SIZE)) ?
-                                                history_count + 1'b1 : history_count;
-                        active_frame_parity <= frame_parity;
-                        map_index           <= {MAP_AW{1'b0}};
-                        active_bin          <= channel_map[0][4:0];
-                        active_channel      <= channel_map[0][9:5];
-                        tap_index           <= 8'd0;
-                        accum_i             <= 42'sd0;
-                        accum_q             <= 42'sd0;
-                        state               <= ST_MAC;
-                    end else begin
-                        overrun <= 1'b1;
-                    end
-                    frame_parity <= ~frame_parity;
-                end else begin
-                    frame_count <= frame_count + 1'b1;
-                end
-            end
-
-            if (state == ST_MAC) begin
-                if (9'(tap_index) + 9'd2 >= 9'(TAPS)) begin
-                    state <= ST_DRAIN;
-                end else begin
-                    tap_index <= tap_index + 8'd2;
-                end
-            end
-
-            if (mac_s4_valid) begin
-                accum_i <= next_accum_i;
-                accum_q <= next_accum_q;
-                if (mac_s4_last) begin
-                    accum_i <= 42'sd0;
-                    accum_q <= 42'sd0;
-                    if (map_index == MAP_AW'(CHANNELS-1)) begin
-                        output_index <= {MAP_AW{1'b0}};
-                        state <= ST_OUTPUT;
-                    end else begin
-                        map_index <= map_index + 1'b1;
-                        active_bin <= next_map_word[4:0];
-                        active_channel <= next_map_word[9:5];
-                        tap_index <= 8'd0;
-                        state <= ST_MAC;
-                    end
-                end
-            end
-
-            if ((state == ST_OUTPUT) && m_ready) begin
-                if (output_index == MAP_AW'(CHANNELS-1)) begin
-                    state <= ST_IDLE;
-                end else begin
-                    output_index <= output_index + 1'b1;
-                end
-            end
-        end
-    end
-endmodule
