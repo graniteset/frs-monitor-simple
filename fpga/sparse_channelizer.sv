@@ -33,6 +33,10 @@ module sparse_channelizer #(
     localparam [2:0] ST_MAC = 3'd1;
     localparam [2:0] ST_DRAIN = 3'd2;
     localparam [2:0] ST_OUTPUT = 3'd3;
+    localparam [2:0] ST_RESULT_CONVERT = 3'd4;
+    localparam [2:0] ST_RESULT_SCALE = 3'd5;
+    localparam [2:0] ST_RESULT_PACK = 3'd6;
+    localparam [2:0] ST_RESULT_WRITE = 3'd7;
 
     reg signed [15:0] history_i [0:HISTORY_SIZE-1];
     reg signed [15:0] history_q [0:HISTORY_SIZE-1];
@@ -63,6 +67,15 @@ module sparse_channelizer #(
     reg [MAP_AW-1:0] output_index;
     reg signed [41:0] accum_i;
     reg signed [41:0] accum_q;
+    reg signed [41:0] result_accum_i;
+    reg signed [41:0] result_accum_q;
+    reg signed [42:0] result_rounded_i;
+    reg signed [42:0] result_rounded_q;
+    reg signed [25:0] result_scaled_i;
+    reg signed [25:0] result_scaled_q;
+    reg [4:0] result_channel;
+    reg result_frame_parity;
+    reg [36:0] result_payload;
 
     // MAC pipeline: dynamic history/coefficient selection, DSP products,
     // per-tap complex sums, pair reduction, then the running accumulator.
@@ -121,27 +134,22 @@ module sparse_channelizer #(
     wire signed [41:0] next_accum_i = accum_i + {{6{mac_s4_term_i[35]}}, mac_s4_term_i};
     wire signed [41:0] next_accum_q = accum_q + {{6{mac_s4_term_q[35]}}, mac_s4_term_q};
 
-    function signed [15:0] q32_to_q15;
-        input signed [41:0] value;
-        reg signed [42:0] rounded;
-        reg signed [25:0] scaled;
-        begin
-            rounded = (value >= 0) ? (value + 43'sd65536) :
-                                      (value - 43'sd65536);
-            scaled = 26'($signed(rounded) >>> 17);
-            if (scaled > 26'sd32767)
-                q32_to_q15 = 16'sd32767;
-            else if (scaled < -26'sd32768)
-                q32_to_q15 = -16'sd32768;
-            else
-                q32_to_q15 = scaled[15:0];
-        end
-    endfunction
-
     function signed [15:0] negate_q15;
         input signed [15:0] value;
         begin
             negate_q15 = (value == -16'sd32768) ? 16'sd32767 : -value;
+        end
+    endfunction
+
+    function signed [15:0] saturate_q15;
+        input signed [25:0] value;
+        begin
+            if (value > 26'sd32767)
+                saturate_q15 = 16'sd32767;
+            else if (value < -26'sd32768)
+                saturate_q15 = -16'sd32768;
+            else
+                saturate_q15 = value[15:0];
         end
     endfunction
 
@@ -203,22 +211,12 @@ module sparse_channelizer #(
         end
     end
 
-    // This result store is intentionally not reset. A result is written only
-    // after its final pipelined term has been included in the accumulator.
+    // This result store is intentionally not reset. The final MAC sum is
+    // captured first, rounded/scaled/packed in separate stages, then
+    // committed here. That breaks the wide accumulate-to-RAM path.
     always @(posedge aclk) begin
-        if (mac_s4_valid) begin
-            if (mac_s4_last) begin
-                channel_results[map_index] <= {
-                    active_channel,
-                    (active_frame_parity && active_bin[0]) ?
-                        negate_q15(q32_to_q15(next_accum_i)) :
-                        q32_to_q15(next_accum_i),
-                    (active_frame_parity && active_bin[0]) ?
-                        negate_q15(q32_to_q15(next_accum_q)) :
-                        q32_to_q15(next_accum_q)
-                };
-            end
-        end
+        if (state == ST_RESULT_WRITE)
+            channel_results[map_index] <= result_payload;
     end
 
     always @(posedge aclk or negedge aresetn) begin
@@ -238,6 +236,15 @@ module sparse_channelizer #(
             active_channel     <= 5'd0;
             accum_i            <= 42'sd0;
             accum_q            <= 42'sd0;
+            result_accum_i     <= 42'sd0;
+            result_accum_q     <= 42'sd0;
+            result_rounded_i   <= 43'sd0;
+            result_rounded_q   <= 43'sd0;
+            result_scaled_i    <= 26'sd0;
+            result_scaled_q    <= 26'sd0;
+            result_channel     <= 5'd0;
+            result_frame_parity <= 1'b0;
+            result_payload     <= 37'd0;
             mac_addr_valid     <= 1'b0;
             mac_addr_last      <= 1'b0;
             mac_s1_valid       <= 1'b0;
@@ -302,18 +309,51 @@ module sparse_channelizer #(
                 accum_i <= next_accum_i;
                 accum_q <= next_accum_q;
                 if (mac_s4_last) begin
+                    result_accum_i <= next_accum_i;
+                    result_accum_q <= next_accum_q;
+                    result_channel <= active_channel;
+                    result_frame_parity <= active_frame_parity && active_bin[0];
                     accum_i <= 42'sd0;
                     accum_q <= 42'sd0;
-                    if (map_index == MAP_AW'(CHANNELS-1)) begin
-                        output_index <= {MAP_AW{1'b0}};
-                        state <= ST_OUTPUT;
-                    end else begin
-                        map_index <= map_index + 1'b1;
-                        active_bin <= next_map_word[4:0];
-                        active_channel <= next_map_word[9:5];
-                        tap_index <= 8'd0;
-                        state <= ST_MAC;
-                    end
+                    state <= ST_RESULT_CONVERT;
+                end
+            end
+
+            if (state == ST_RESULT_CONVERT) begin
+                result_rounded_i <= (result_accum_i >= 0) ?
+                    (result_accum_i + 43'sd65536) : (result_accum_i - 43'sd65536);
+                result_rounded_q <= (result_accum_q >= 0) ?
+                    (result_accum_q + 43'sd65536) : (result_accum_q - 43'sd65536);
+                state <= ST_RESULT_SCALE;
+            end
+
+            if (state == ST_RESULT_SCALE) begin
+                result_scaled_i <= 26'($signed(result_rounded_i) >>> 17);
+                result_scaled_q <= 26'($signed(result_rounded_q) >>> 17);
+                state <= ST_RESULT_PACK;
+            end
+
+            if (state == ST_RESULT_PACK) begin
+                result_payload <= {
+                    result_channel,
+                    result_frame_parity ? negate_q15(saturate_q15(result_scaled_i)) :
+                                          saturate_q15(result_scaled_i),
+                    result_frame_parity ? negate_q15(saturate_q15(result_scaled_q)) :
+                                          saturate_q15(result_scaled_q)
+                };
+                state <= ST_RESULT_WRITE;
+            end
+
+            if (state == ST_RESULT_WRITE) begin
+                if (map_index == MAP_AW'(CHANNELS-1)) begin
+                    output_index <= {MAP_AW{1'b0}};
+                    state <= ST_OUTPUT;
+                end else begin
+                    map_index <= map_index + 1'b1;
+                    active_bin <= next_map_word[4:0];
+                    active_channel <= next_map_word[9:5];
+                    tap_index <= 8'd0;
+                    state <= ST_MAC;
                 end
             end
 
