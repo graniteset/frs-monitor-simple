@@ -1,0 +1,11 @@
+{
+  "input_samples": 2048,
+  "sample_rate_hz": 25000,
+  "max_deviation_hz": 2500,
+  "gain": 1.5915494309189533,
+  "modulation_tones_hz": [
+    625,
+    1600
+  ],
+  "comparison": "Q1.15 output from quantized complex input; tolerance 8 LSB"
+}

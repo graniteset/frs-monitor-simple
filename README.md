@@ -5,7 +5,7 @@ monitoring all 22 analog FRS channels from one wideband SDR capture.
 
 ## Features
 
-- One shared 512-bin polyphase channelizer with 22 selected FRS outputs
+- Two sparse 32-bin polyphase channelizers covering only the occupied FRS bands
 - Independent power squelch and NBFM demodulation for every channel
 - Mixed live audio plus separate 12.5 kHz channel recordings
 - Live waterfall with selectable conversation borders and touch history browsing
@@ -20,8 +20,8 @@ activity timeline.
 
 Each transmission is also saved separately under `recordings/channel_01/`
 through `recordings/channel_22/`. Files are timestamped 12.5 kHz mono PCM WAV
-clips, matching the useful bandwidth of narrowband FRS voice, with a short hang
-time so brief pauses do not split a conversation. Live mixing and browser
+clips, matching the useful bandwidth of narrowband FRS voice. Recording closes
+at the first silent squelched block, without adding post-key-off audio. Live mixing and browser
 streaming use the same rate; Web Audio resamples to the device's native output
 rate. Set
 `--record-dir /some/path` to choose another location or `--record-dir ''` to
@@ -34,7 +34,11 @@ Drag/wheel gestures scroll the stored spectrum and transmission borders
 together; tap a border to play that channel continuously from the selected
 time, including silence between transmissions. The active border turns white,
 a playback marker follows the channel timeline, and an on-plot badge shows the
-source channel. Press **Live** to return to the current edge. The custom renderer
+source channel. A predominantly horizontal two-finger pinch zooms frequency
+only, making adjacent 12.5 kHz channels easier to select; a predominantly
+vertical pinch zooms time only. Once frequency is zoomed, a one-finger horizontal
+drag pans across the RF spectrum while a vertical drag continues to browse time.
+Press **Live** to return to the current edge. The custom renderer
 retains ten minutes of waterfall history in memory unless a disk session is
 being recorded.
 
@@ -82,7 +86,9 @@ Run the GUI without radio hardware using repeatable 6.4 MS/s complex IQ. Its
 and overlaps on channels 1, 3, 6, 8, 12, and 20. Channel 15 carries a deliberately
 weak transmission. The synthetic noise floor is approximately -96 dBFS and
 signal strengths span 10–60 dB above it. The displayed power, generated IQ,
-and squelch decisions all use that same scale:
+and squelch decisions all use that same scale. Synthetic transmitters use a
+12 ms RF power ramp so key-up/down does not create unrealistic broadband
+splatter:
 
 ```bash
 ./frs_all_channels.py --test-input
@@ -94,7 +100,10 @@ runs reuse it, keeping Python out of the real-time IQ path. Use
 `--regenerate-test-iq` to rebuild it or `--test-iq-file PATH` to place/reuse it
 somewhere else.
 
-Run the automated headless DSP/squelch check:
+Run the automated headless DSP/squelch check. It defaults to a deliberately low
+-84 dB squelch threshold, includes simultaneous channels 1 and 15 at 12.5 kHz
+spacing with channel 1 50 dB stronger, and verifies that the weak adjacent
+channel remains closed:
 
 ```bash
 ./frs_all_channels.py --self-test
@@ -112,8 +121,9 @@ the complete synthetic-IQ path instead of the lightweight fixture:
 ./frs_all_channels.py --web --test-input --web-real-iq
 ```
 
-This uses the same shared 512-bin PFB analysis bank as a wideband SDR. The bank
-extracts only the 22 required outputs, while one consolidated monitor handles
+This translates the two occupied FRS clusters to baseband, decimates each to
+400 kS/s, and feeds two 32-bin PFB analysis banks. The banks extract only the 22
+required outputs, while one consolidated monitor handles
 per-channel levels and 12.5 kHz recordings. Each 25 kS/s PFB channel now feeds
 the NBFM receiver directly, eliminating the former complex and audio resamplers.
 
@@ -188,9 +198,13 @@ To exercise the complete save/open workflow without an SDR:
 
 ```mermaid
 flowchart LR
-    RF["SDR or synthetic IQ<br/>6.4 MS/s complex"] --> PFB["One 512-bin PFB<br/>22 selected outputs"]
+    RF["SDR or synthetic IQ<br/>6.4 MS/s complex"] --> LOW["Translate 462.6 MHz cluster<br/>decimate to 400 kS/s"]
+    RF --> HIGH["Translate 467.6 MHz cluster<br/>decimate to 400 kS/s"]
     RF --> FFT["4096-point waterfall FFT<br/>about 20 rows/s"]
-    PFB --> BANK["22 × squelch + NBFM<br/>25 kS/s IQ → 12.5 kHz audio"]
+    LOW --> PFB1["32-bin PFB<br/>15 selected outputs"]
+    HIGH --> PFB2["32-bin PFB<br/>7 selected outputs"]
+    PFB1 --> BANK["22 × squelch + NBFM<br/>25 kS/s IQ → 12.5 kHz audio"]
+    PFB2 --> BANK
     BANK --> MON["Consolidated monitor<br/>activity + channel WAVs"]
     BANK --> MIX["22-channel mixer<br/>12.5 kHz mono"]
     FFT --> WEB["Browser dashboard"]
@@ -200,8 +214,36 @@ flowchart LR
     MON --> SESSION
 ```
 
-GNU Radio's PFB block accepts commutated phase inputs internally exposed as
-stream ports; it is one channelizer, not 512 independent PFBs.
+Each GNU Radio PFB accepts commutated phase inputs internally exposed as stream
+ports. There are two 32-bin channelizers, not 64 independent PFBs.
+
+### Portable FPGA receive prototype
+
+`fpga/frs_receive_core.sv` is a board-independent SystemVerilog prototype of
+the same 6.4 MS/s → dual 400 kS/s DDC → two sparse 32-bin PFBs → 22 tagged
+12.5 kHz audio paths. Its input is signed 12-bit ADC I/Q, converted at the
+wrapper boundary to Q1.15 by shifting left four bits. This is an explicit
+assumption; confirm the PlutoPlus/AD9363 HDL's exact ADC word formatting before
+connecting the board. The core is a reference implementation, not yet
+integrated with ADI DMA, clocks, or board-specific logic.
+
+The full-chain test vectors in `fpga/vectors/` are generated by
+`fpga/generate_receive_burst_vectors.py` from deterministic 12-bit IQ. They
+contain a channel 4 burst, an adjacent channel 5 burst 20 dB stronger in RF
+power, and a channel 11 burst in the second band, with noise and quiet gaps.
+The golden vectors come from the GNU Radio DDC/PFB/squelch/NBFM graph. The
+RTL's steady-transmission audio windows compare to those references within
+32 Q1.15 LSB maximum and 8 LSB RMS (observed: 4/1, 2/1, and 2/0 LSB for
+channels 4, 5, and 11). Full-vector errors include expected squelch/FIR burst
+edge differences; they are reported separately from these settled-window
+assertions. Both band DDCs are also independently checked against GNU Radio.
+
+The sample interfaces honor valid/ready backpressure, but a live ADC cannot
+necessarily pause when the core deasserts ready. The hardware wrapper must
+provide enough upstream buffering or prove sustained service at the real ADC
+rate. An intentional output-stall test confirms that a blocked consumer
+eventually sets the PFB overrun flags rather than silently hiding the loss;
+it does not size the eventual board FIFO.
 
 ## Testing and benchmarking
 
@@ -209,12 +251,17 @@ stream ports; it is one channelizer, not 512 independent PFBs.
 make test
 make self-test
 make benchmark
+make fpga-test
 ```
 
 `make test` runs the unit and localhost dashboard regressions. `make self-test`
 generates the cached synthetic IQ fixture if needed and checks representative
 channel/squelch behavior through the complete DSP graph. `make benchmark`
 removes the synthetic source throttle and reports the maximum realtime factor.
+`make fpga-test` runs Icarus self-checking tests including the full dual-band
+FM-burst path and stalled-output overrun case. GitHub Actions also runs
+Verilator `--Wall` lint and a generic Yosys hierarchy/process/check/stat pass;
+this is a structural check, not Vivado implementation or a resource estimate.
 
 ## Repository layout
 

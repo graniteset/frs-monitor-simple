@@ -1,0 +1,23 @@
+{
+  "input_samples": 4096,
+  "input_rate_hz": 400000,
+  "expected_frames": 254,
+  "expected_words": 508,
+  "bins": [
+    6,
+    7
+  ],
+  "tones": [
+    {
+      "bin": 6,
+      "amplitude": 0.1
+    },
+    {
+      "bin": 7,
+      "amplitude": 0.8
+    }
+  ],
+  "adjacent_power_ratio_db": 18.06179973983887,
+  "phase_alignment": "native GNU PFB phase convention",
+  "comparison": "Q1.15 I/Q, ignore first two RTL frames and allow 12 LSB"
+}

@@ -1,0 +1,27 @@
+{
+  "input_samples": 4096,
+  "expected_outputs": 256,
+  "input_rate_hz": 6400000,
+  "decimation": 16,
+  "mix_frequency_hz": 2512500,
+  "components": [
+    [
+      2487500,
+      0.1,
+      0.31
+    ],
+    [
+      2537500,
+      0.2,
+      -0.73
+    ],
+    [
+      -2487500,
+      0.4,
+      1.07
+    ]
+  ],
+  "rtl_phase_step": 311,
+  "rtl_initial_phase": 490,
+  "comparison": "Q1.15 I/Q, tolerance 6 LSB"
+}

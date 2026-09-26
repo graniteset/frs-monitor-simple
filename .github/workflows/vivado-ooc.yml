@@ -1,0 +1,91 @@
+name: Vivado OOC synthesis
+
+on:
+  # Self-hosted Vivado runs are restricted to pushes from trusted repository
+  # writers. Do not run arbitrary fork PR code on a licensed desktop runner.
+  push:
+    paths:
+      - 'fpga/**'
+      - '.github/workflows/vivado-ooc.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vivado-ooc:
+    name: Synthesize FRS core and publish timing reports
+    runs-on: [self-hosted, Linux, X64, vivado]
+    timeout-minutes: 45
+    env:
+      VIVADO_BIN: /opt/Xilinx/2026.1/Vivado/bin/vivado
+      FRS_OOC_OUT: ${{ github.workspace }}/work/frs_vivado_ci_${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Vivado and target part support
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -x "$VIVADO_BIN" ]]; then
+            echo "Vivado executable not found at $VIVADO_BIN" >&2
+            exit 1
+          fi
+          "$VIVADO_BIN" -version
+
+      - name: Run out-of-context synthesis
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$VIVADO_BIN" -mode batch -source fpga/plutosky_r2/ooc_synth.tcl
+
+      - name: Summarize timing and utilization
+        if: always()
+        shell: bash
+        run: |
+          python3 - "$FRS_OOC_OUT/timing_summary.rpt" "$FRS_OOC_OUT/utilization.rpt" <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          timing_path, utilization_path = map(pathlib.Path, sys.argv[1:])
+          summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+          lines = ["## Vivado OOC synthesis"]
+          worst_slack = None
+          if timing_path.exists():
+              timing = timing_path.read_text(errors="replace")
+              match = re.search(r"Worst Slack\s+([-+0-9.]+)ns", timing)
+              if match:
+                  worst_slack = float(match.group(1))
+                  lines.append(f"- Worst setup slack: **{worst_slack:.3f} ns**")
+              else:
+                  lines.append("- Worst setup slack: not parsed")
+              lines.append("- Timing report: `timing_summary.rpt`")
+          else:
+              lines.append("- Timing report was not produced.")
+          if utilization_path.exists():
+              utilization = utilization_path.read_text(errors="replace")
+              for label, pattern in (("Slice LUTs", r"\| Slice LUTs\*?\s*\|\s*(\d+)\s*\|"),
+                                     ("Slice registers", r"\| Slice Registers\s*\|\s*(\d+)\s*\|"),
+                                     ("Block RAM tiles", r"\| Block RAM Tile\s*\|\s*(\d+)\s*\|"),
+                                     ("DSPs", r"\| DSPs\s*\|\s*(\d+)\s*\|")):
+                  match = re.search(pattern, utilization)
+                  if match:
+                      lines.append(f"- {label}: {match.group(1)}")
+          summary.write_text("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          if worst_slack is not None and worst_slack < 0:
+              raise SystemExit("OOC setup timing failed: worst slack is negative")
+          PY
+
+      - name: Upload Vivado logs and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vivado-ooc-${{ github.run_id }}
+          path: |
+            vivado.log
+            ${{ env.FRS_OOC_OUT }}/
+          if-no-files-found: warn
+          retention-days: 30

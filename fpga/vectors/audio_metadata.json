@@ -1,0 +1,12 @@
+{
+  "input_samples": 2048,
+  "expected_outputs": 1024,
+  "input_rate_hz": 25000,
+  "output_rate_hz": 12500,
+  "decimation": 2,
+  "taps": 121,
+  "cutoff_hz": 2700,
+  "transition_hz": 500,
+  "channel_gain": 0.25,
+  "comparison": "Q1.15 output, tolerance 6 LSB"
+}

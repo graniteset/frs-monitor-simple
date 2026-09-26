@@ -258,6 +258,13 @@ class WebDashboardTests(unittest.TestCase):
         self.assertNotIn("function color(v)", page)
         self.assertIn("&since=${since}", page)
         self.assertIn("function setOffset(value,force=false)", page)
+        self.assertIn("function beginPinch()", page)
+        self.assertIn("pinch.axis==='frequency'", page)
+        self.assertIn("pinch.axis==='time'", page)
+        self.assertIn("canvas.dataset.freqSpan", page)
+        self.assertIn("canvas.dataset.freqCenter", page)
+        self.assertIn("drag.axis==='frequency'", page)
+        self.assertIn("clampFreqCenter(freqCenter-dx", page)
         self.assertIn("incoming[0].seq>expected+1", page)
         self.assertIn("pointercancel", page)
         self.assertIn("function stopLiveSources()", page)
@@ -507,6 +514,25 @@ class WebDashboardTests(unittest.TestCase):
         self.assertEqual(events.get()[:2], ("end", 3))
         self.assertAlmostEqual(monitor.processed / 16_000, 0.2)
 
+    def test_default_recorder_writes_no_post_key_off_silence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = queue.Queue()
+            monitor = ChannelMonitorSink(
+                16_000, directory, events, 100.0, 0.25)
+            active = [np.zeros(1_600, dtype=np.float32)
+                      for _ in FRS_CHANNELS_HZ]
+            active[0][:] = 1.0
+            monitor.work(active, [])
+            started = events.get()
+            monitor.work([np.zeros(1_600, dtype=np.float32)
+                          for _ in FRS_CHANNELS_HZ], [])
+            ended = events.get()
+            self.assertEqual(started[:2], ("start", 1))
+            self.assertEqual(ended[:2], ("end", 1))
+            self.assertAlmostEqual(ended[2], 100.1)
+            with wave.open(started[3], "rb") as recording:
+                self.assertEqual(recording.getnframes(), 1_600)
+
     def test_optimized_default_sample_rate_covers_all_frs_channels(self):
         half = DEFAULT_SAMPLE_RATE / 2
         self.assertGreaterEqual(FRSReceiver.LOWEST_HZ - 15_000,
@@ -514,6 +540,22 @@ class WebDashboardTests(unittest.TestCase):
         self.assertLessEqual(FRSReceiver.HIGHEST_HZ + 15_000,
                              FRSReceiver.PLUTO_CENTER_HZ + half)
         self.assertEqual(DEFAULT_SAMPLE_RATE % 12_500, 0)
+
+    def test_sparse_channelizer_geometry_and_adjacent_stress_case(self):
+        self.assertEqual(FRSReceiver.SUBBAND_RATE // 12_500, 32)
+        for frequency in FRS_CHANNELS_HZ:
+            covering = [center for center in FRSReceiver.SUBBAND_CENTERS_HZ
+                        if abs(frequency - center) <= 100_000]
+            self.assertEqual(len(covering), 1)
+
+        # Channels 15 and 1 are directly adjacent on the 12.5 kHz grid. The
+        # full-DSP self-test runs them simultaneously with a 50 dB imbalance.
+        self.assertEqual(FRS_CHANNELS_HZ[0] - FRS_CHANNELS_HZ[14], 12_500)
+        simultaneous = {
+            channel: snr for start, end, channel, snr, _tone, _label
+            in TEST_CONVERSATIONS if start <= 0.25 < end
+        }
+        self.assertEqual(simultaneous[1] - simultaneous[15], 50.0)
 
 
 if __name__ == "__main__":
