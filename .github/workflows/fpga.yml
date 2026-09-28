@@ -23,6 +23,7 @@ jobs:
       - name: Lint board-independent RTL
         run: |
           # Blocking assignments inside pure helper functions are intentional.
+          verilator --lint-only --Wall -Wno-BLKSEQ -Wno-TIMESCALEMOD --top-module frs_ad9361_rx_adapter fpga/frs_ad9361_rx_adapter.sv
           verilator --lint-only --Wall -Wno-BLKSEQ -Wno-TIMESCALEMOD --top-module iq_test_source fpga/iq_test_source.sv
           verilator --lint-only --Wall -Wno-BLKSEQ --top-module axis_iq_mux fpga/axis_iq_mux.sv
           verilator --lint-only --Wall -Wno-BLKSEQ --top-module band_ddc_decimator fpga/band_ddc_decimator.sv
