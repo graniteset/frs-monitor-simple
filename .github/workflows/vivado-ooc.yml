@@ -1,12 +1,8 @@
 name: Vivado OOC synthesis
 
 on:
-  # Self-hosted Vivado runs are restricted to pushes from trusted repository
-  # writers. Do not run arbitrary fork PR code on a licensed desktop runner.
-  push:
-    paths:
-      - 'fpga/**'
-      - '.github/workflows/vivado-ooc.yml'
+  # Deliberately manual only. Never run fork PR or routine push code on the
+  # licensed self-hosted desktop. Choose a reviewed repo branch in the UI.
   workflow_dispatch:
 
 permissions:
@@ -14,14 +10,32 @@ permissions:
 
 jobs:
   vivado-ooc:
-    name: Synthesize FRS core and publish timing reports
+    name: Synthesize CLG400 FRS core and publish timing/power reports
     runs-on: [self-hosted, Linux, X64, vivado]
     timeout-minutes: 45
+    # Configure this environment in repository settings with required reviewer
+    # approval and deployment branches limited to reviewed/trusted branches.
+    environment: vivado-ooc
+    concurrency:
+      group: vivado-ooc-${{ github.repository }}
+      cancel-in-progress: false
     env:
       VIVADO_BIN: /opt/Xilinx/2026.1/Vivado/bin/vivado
       FRS_OOC_OUT: ${{ github.workspace }}/work/frs_vivado_ci_${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Use the exact commit selected in the Run workflow branch picker.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Show reviewed source revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Dispatch ref: $GITHUB_REF"
+          echo "Checked-out commit: $(git rev-parse HEAD)"
+          echo "This job is manual-only; verify the selected branch/commit was reviewed."
 
       - name: Verify Vivado and target part support
         shell: bash
@@ -39,17 +53,17 @@ jobs:
           set -euo pipefail
           "$VIVADO_BIN" -mode batch -source fpga/plutosky_r2/ooc_synth.tcl
 
-      - name: Summarize timing and utilization
+      - name: Summarize timing, utilization, and power report availability
         if: always()
         shell: bash
         run: |
-          python3 - "$FRS_OOC_OUT/timing_summary.rpt" "$FRS_OOC_OUT/utilization.rpt" <<'PY'
+          python3 - "$FRS_OOC_OUT/timing_summary.rpt" "$FRS_OOC_OUT/utilization.rpt" "$FRS_OOC_OUT/power_estimate.rpt" <<'PY'
           import os
           import pathlib
           import re
           import sys
 
-          timing_path, utilization_path = map(pathlib.Path, sys.argv[1:])
+          timing_path, utilization_path, power_path = map(pathlib.Path, sys.argv[1:])
           summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
           lines = ["## Vivado OOC synthesis"]
           worst_slack = None
@@ -73,6 +87,11 @@ jobs:
                   match = re.search(pattern, utilization)
                   if match:
                       lines.append(f"- {label}: {match.group(1)}")
+          if power_path.exists():
+              lines.append("- Vectorless power report: produced; see `power_estimate.rpt` in the artifact.")
+              lines.append("- Power caveat: no board placement or SAIF activity trace is supplied, so treat this as indicative only.")
+          else:
+              lines.append("- Power report was not produced.")
           summary.write_text("\n".join(lines) + "\n")
           print("\n".join(lines))
           if worst_slack is not None and worst_slack < 0:
@@ -86,6 +105,7 @@ jobs:
           name: vivado-ooc-${{ github.run_id }}
           path: |
             vivado.log
+            vivado.jou
             ${{ env.FRS_OOC_OUT }}/
           if-no-files-found: warn
           retention-days: 30
