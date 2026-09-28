@@ -1,15 +1,15 @@
 # Source this from an OPEN Vivado project only. It adds the portable FRS RTL
 # and its coefficient memories to sources_1 without changing the project top,
 # block design, constraints, ports, or vendor receive path. The
-# frs_plutosky_r2_stream module will then be available as an RTL module
+# legacy-named frs_plutosky_r2_stream module will then be available as an RTL module
 # reference for a later, explicitly reviewed BD integration step.
 
 if {[current_project -quiet] eq ""} {
-  error "Open the PlutoSky R2 Vivado project before sourcing this hook."
+  error "Open the OpenSourceSDRLab CLG400 Vivado project before sourcing this hook."
 }
 set part [get_property PART [current_project]]
-if {![string match -nocase "xc7z020clg484-*" $part]} {
-  error "Expected an XC7Z020 CLG484 project; current project part is '$part'."
+if {![string match -nocase "xc7z020clg400-*" $part]} {
+  error "Expected an XC7Z020 CLG400 project; current project part is '$part'."
 }
 
 set hook_dir [file dirname [file normalize [info script]]]
@@ -27,6 +27,7 @@ set rtl_rel [list \
   fpga/frs_channel_audio.sv \
   fpga/frs_multi_channel_audio.sv \
   fpga/frs_receive_core.sv \
+  fpga/frs_ad9361_rx_adapter.sv \
   fpga/plutosky_r2/frs_plutosky_r2_stream.sv]
 set coeff_rel [list \
   fpga/coeffs/subband_q17.memh \
