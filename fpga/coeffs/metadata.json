@@ -1,0 +1,188 @@
+{
+  "sample_rates_hz": {
+    "input": 6400000,
+    "subband": 400000,
+    "channel": 25000,
+    "audio": 12500
+  },
+  "coefficient_format": "signed 18-bit Q1.17, round-to-nearest/clamp",
+  "files": {
+    "subband_q17.memh": {
+      "tap_count": 205,
+      "float_sum": 0.9999999970495992,
+      "fixed_sum": 1.000030517578125
+    },
+    "channel_q17.memh": {
+      "tap_count": 241,
+      "float_sum": 1.0000000062791514,
+      "fixed_sum": 1.000030517578125
+    },
+    "audio_q17.memh": {
+      "tap_count": 121,
+      "float_sum": 0.9999999957217369,
+      "fixed_sum": 0.99993896484375
+    }
+  },
+  "deemphasis": {
+    "sample_rate_hz": 25000,
+    "tau_seconds": 7.5e-05,
+    "format": "signed 18-bit Q1.17 [feedforward b0, feedback -a1]",
+    "b0": 0.21456065057588408,
+    "feedback": 0.5708786988482318,
+    "fixed": [
+      28123,
+      74826
+    ]
+  },
+  "nco": {
+    "phase_bits": 9,
+    "phase_step_band_1": 199,
+    "phase_step_band_2": 311,
+    "phase_initial_band_1": 330,
+    "phase_initial_band_2": 490,
+    "mixer_sign": "exp(-j*2*pi*delta_hz*n/input_rate)",
+    "initial_phase_corrects_for": "(tap_count-1)/2 FIR group delay",
+    "centers_hz": [
+      462637500,
+      467637500
+    ]
+  },
+  "channel_map": {
+    "band1": [
+      {
+        "channel": 1,
+        "frequency_hz": 462562500,
+        "band_center_hz": 462637500,
+        "bin": 26
+      },
+      {
+        "channel": 2,
+        "frequency_hz": 462587500,
+        "band_center_hz": 462637500,
+        "bin": 28
+      },
+      {
+        "channel": 3,
+        "frequency_hz": 462612500,
+        "band_center_hz": 462637500,
+        "bin": 30
+      },
+      {
+        "channel": 4,
+        "frequency_hz": 462637500,
+        "band_center_hz": 462637500,
+        "bin": 0
+      },
+      {
+        "channel": 5,
+        "frequency_hz": 462662500,
+        "band_center_hz": 462637500,
+        "bin": 2
+      },
+      {
+        "channel": 6,
+        "frequency_hz": 462687500,
+        "band_center_hz": 462637500,
+        "bin": 4
+      },
+      {
+        "channel": 7,
+        "frequency_hz": 462712500,
+        "band_center_hz": 462637500,
+        "bin": 6
+      },
+      {
+        "channel": 15,
+        "frequency_hz": 462550000,
+        "band_center_hz": 462637500,
+        "bin": 25
+      },
+      {
+        "channel": 16,
+        "frequency_hz": 462575000,
+        "band_center_hz": 462637500,
+        "bin": 27
+      },
+      {
+        "channel": 17,
+        "frequency_hz": 462600000,
+        "band_center_hz": 462637500,
+        "bin": 29
+      },
+      {
+        "channel": 18,
+        "frequency_hz": 462625000,
+        "band_center_hz": 462637500,
+        "bin": 31
+      },
+      {
+        "channel": 19,
+        "frequency_hz": 462650000,
+        "band_center_hz": 462637500,
+        "bin": 1
+      },
+      {
+        "channel": 20,
+        "frequency_hz": 462675000,
+        "band_center_hz": 462637500,
+        "bin": 3
+      },
+      {
+        "channel": 21,
+        "frequency_hz": 462700000,
+        "band_center_hz": 462637500,
+        "bin": 5
+      },
+      {
+        "channel": 22,
+        "frequency_hz": 462725000,
+        "band_center_hz": 462637500,
+        "bin": 7
+      }
+    ],
+    "band2": [
+      {
+        "channel": 8,
+        "frequency_hz": 467562500,
+        "band_center_hz": 467637500,
+        "bin": 26
+      },
+      {
+        "channel": 9,
+        "frequency_hz": 467587500,
+        "band_center_hz": 467637500,
+        "bin": 28
+      },
+      {
+        "channel": 10,
+        "frequency_hz": 467612500,
+        "band_center_hz": 467637500,
+        "bin": 30
+      },
+      {
+        "channel": 11,
+        "frequency_hz": 467637500,
+        "band_center_hz": 467637500,
+        "bin": 0
+      },
+      {
+        "channel": 12,
+        "frequency_hz": 467662500,
+        "band_center_hz": 467637500,
+        "bin": 2
+      },
+      {
+        "channel": 13,
+        "frequency_hz": 467687500,
+        "band_center_hz": 467637500,
+        "bin": 4
+      },
+      {
+        "channel": 14,
+        "frequency_hz": 467712500,
+        "band_center_hz": 467637500,
+        "bin": 6
+      }
+    ]
+  }
+}

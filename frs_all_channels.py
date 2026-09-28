@@ -49,6 +49,8 @@ TEST_NOISE_FLOOR_DB = -96.0
 TEST_IQ_NOISE_STD = 8.0e-4
 DEFAULT_SAMPLE_RATE = 6_400_000
 TEST_IQ_PERIOD = 12.0
+TEST_IQ_FIXTURE_VERSION = 2
+TEST_TX_RAMP_SECONDS = 0.012
 
 TEST_CONVERSATIONS = (
     # start, end, channel, SNR above the synthetic noise floor, tone, label
@@ -584,12 +586,22 @@ def generate_synthetic_iq_file(path, sample_rate, center_hz, force=False):
                     continue
                 carrier = FRS_CHANNELS_HZ[channel - 1] - center_hz
                 local = absolute_t[active] - start
+                ending = end - absolute_t[active]
+                attack = np.sin(
+                    np.pi / 2 * np.clip(
+                        local / TEST_TX_RAMP_SECONDS, 0.0, 1.0)) ** 2
+                release = np.sin(
+                    np.pi / 2 * np.clip(
+                        ending / TEST_TX_RAMP_SECONDS, 0.0, 1.0)) ** 2
+                envelope = attack * release
                 modulation = (0.72 * np.sin(2 * np.pi * tone_hz * local) +
                               0.28 * np.sin(2 * np.pi * tone_hz * 1.37 * local))
                 phase = (2 * np.pi * carrier * absolute_t[active] +
                          (2_500.0 / tone_hz) * modulation)
                 amplitude = 10.0 ** ((TEST_NOISE_FLOOR_DB + snr_db) / 20.0)
-                iq[active] += (amplitude * np.exp(1j * phase)).astype(np.complex64)
+                iq[active] += (
+                    amplitude * envelope * np.exp(1j * phase)
+                ).astype(np.complex64)
             output.write(iq.tobytes())
     os.replace(temporary, path)
     return path
@@ -599,7 +611,7 @@ class ChannelMonitorSink(gr.sync_block):
     """Monitor and record all demodulated channels in one scheduled block."""
 
     def __init__(self, sample_rate, directory, events, timeline_origin,
-                 channel_gain, open_rms=0.002, hang_seconds=0.8):
+                 channel_gain, open_rms=0.002, hang_seconds=0.0):
         super().__init__(name="FRS channel monitor/recorder bank",
                          in_sig=[np.float32] * len(FRS_CHANNELS_HZ), out_sig=None)
         self.sample_rate = sample_rate
@@ -655,7 +667,12 @@ class ChannelMonitorSink(gr.sync_block):
                 if self.started[index] is None:
                     self._open(index, block_start)
             elif self.started[index] is not None:
-                self.remaining[index] -= count
+                if self.hang_samples <= 0:
+                    # End at the beginning of the first silent block so the
+                    # WAV contains no post-key-off padding.
+                    self._close(index, block_start)
+                else:
+                    self.remaining[index] -= count
             if self.started[index] is not None and self.wavs[index]:
                 pcm = np.clip(samples, -1.0, 1.0)
                 self.wavs[index].writeframes(
@@ -673,11 +690,29 @@ class ChannelMonitorSink(gr.sync_block):
         return True
 
 
+class ChannelPowerSink(gr.sync_block):
+    """Capture peak block power at every PFB output for RF self-tests."""
+
+    def __init__(self):
+        super().__init__(name="FRS self-test channel power",
+                         in_sig=[np.complex64] * len(FRS_CHANNELS_HZ),
+                         out_sig=None)
+        self.levels_db = [-200.0] * len(FRS_CHANNELS_HZ)
+
+    def work(self, input_items, output_items):
+        for index, samples in enumerate(input_items):
+            if len(samples):
+                power = float(np.mean(np.abs(samples) ** 2))
+                self.levels_db[index] = max(
+                    self.levels_db[index], 10.0 * np.log10(max(power, 1e-20)))
+        return len(input_items[0]) if input_items else 0
+
+
 class ConversationRecorder(gr.sync_block):
     """Segment one squelched audio stream into per-transmission WAV files."""
 
     def __init__(self, channel, sample_rate, directory, events, timeline_origin,
-                 open_rms=0.002, hang_seconds=0.8):
+                 open_rms=0.002, hang_seconds=0.0):
         super().__init__(name=f"FRS {channel} conversation recorder",
                          in_sig=[np.float32], out_sig=None)
         self.channel = channel
@@ -728,7 +763,10 @@ class ConversationRecorder(gr.sync_block):
             if self.started is None:
                 self._open(block_start)
         elif self.started is not None:
-            self.remaining -= len(samples)
+            if self.hang_samples <= 0:
+                self._close(block_start)
+            else:
+                self.remaining -= len(samples)
 
         if self.started is not None:
             if self.wav:
@@ -823,6 +861,8 @@ class FRSReceiver(gr.top_block):
     LOWEST_HZ = min(FRS_CHANNELS_HZ)
     HIGHEST_HZ = max(FRS_CHANNELS_HZ)
     PLUTO_CENTER_HZ = 465_125_000
+    SUBBAND_RATE = 400_000
+    SUBBAND_CENTERS_HZ = (462_637_500, 467_637_500)
 
     def __init__(self, args):
         super().__init__("All-channel FRS receiver")
@@ -839,8 +879,11 @@ class FRSReceiver(gr.top_block):
             raise ValueError(
                 f"--sample-rate must be an integer multiple of {self.QUAD_RATE}"
             )
-        if args.sample_rate % 400_000:
-            raise ValueError("--sample-rate must also be an integer multiple of 400000")
+        if args.sample_rate % self.SUBBAND_RATE:
+            raise ValueError(
+                f"--sample-rate must also be an integer multiple of "
+                f"{self.SUBBAND_RATE}"
+            )
         required = (self.HIGHEST_HZ - self.LOWEST_HZ) + 30_000
         if args.sample_rate < required:
             raise ValueError(
@@ -859,7 +902,8 @@ class FRSReceiver(gr.top_block):
         if args.test_input:
             default_iq = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "work",
-                f"frs_test_{args.sample_rate}_{round(self.center_hz)}.cf32")
+                f"frs_test_v{TEST_IQ_FIXTURE_VERSION}_{args.sample_rate}_"
+                f"{round(self.center_hz)}.cf32")
             iq_path = generate_synthetic_iq_file(
                 getattr(args, "test_iq_file", None) or default_iq,
                 args.sample_rate, self.center_hz,
@@ -899,34 +943,65 @@ class FRSReceiver(gr.top_block):
                 keep_n * fft_size / args.sample_rate)
             self.connect(rf_stream, vectorizer, keep, self.spectrum_sink)
 
-        # A single 12.5 kHz analysis bank shares the wideband transform across
-        # every channel. Oversampling by two yields 25 kS/s channel outputs.
-        channel_count = args.sample_rate // 12_500
-        channel_taps = firdes.low_pass(
-            1.0, args.sample_rate, 6_000, 4_000,
+        # FRS occupies two narrow clusters separated by 5 MHz. Translate and
+        # decimate each cluster before channelizing it, instead of running a
+        # 512-bin bank across mostly empty spectrum. Each 400 kS/s sub-band uses
+        # one 32-bin PFB; oversampling by two yields 25 kS/s channel outputs.
+        subband_decimation = args.sample_rate // self.SUBBAND_RATE
+        subband_taps = firdes.low_pass(
+            1.0, args.sample_rate, 100_000, 75_000,
             window.WIN_HAMMING,
         )
-        splitter = blocks.stream_to_streams(gr.sizeof_gr_complex, channel_count)
-        channelizer = filter.pfb_channelizer_ccf(channel_count, channel_taps, 2.0)
-        channelizer.set_tag_propagation_policy(gr.TPP_DONT)
-        selected_bins = [
-            round((frequency - self.center_hz) / 12_500) % channel_count
-            for frequency in FRS_CHANNELS_HZ
-        ]
-        channelizer.set_channel_map(selected_bins)
-        self.connect(rf_stream, splitter)
-        for port in range(channel_count):
-            self.connect((splitter, port), (channelizer, port))
-        self.channelizers = [(splitter, channelizer)]
+        channel_count = self.SUBBAND_RATE // 12_500
+        channel_taps = firdes.low_pass(
+            1.0, self.SUBBAND_RATE, 6_000, 4_000,
+            window.WIN_HAMMING,
+        )
+        self.channelizers = []
+        channel_routes = {}
+        for band_center in self.SUBBAND_CENTERS_HZ:
+            translator = filter.freq_xlating_fir_filter_ccc(
+                subband_decimation,
+                subband_taps,
+                band_center - self.center_hz,
+                args.sample_rate,
+            )
+            members = [
+                (index, frequency)
+                for index, frequency in enumerate(FRS_CHANNELS_HZ)
+                if abs(frequency - band_center) <= 100_000
+            ]
+            splitter = blocks.stream_to_streams(
+                gr.sizeof_gr_complex, channel_count)
+            channelizer = filter.pfb_channelizer_ccf(
+                channel_count, channel_taps, 2.0)
+            channelizer.set_tag_propagation_policy(gr.TPP_DONT)
+            selected_bins = [
+                round((frequency - band_center) / 12_500) % channel_count
+                for _index, frequency in members
+            ]
+            channelizer.set_channel_map(selected_bins)
+            self.connect(rf_stream, translator, splitter)
+            for input_port in range(channel_count):
+                self.connect((splitter, input_port),
+                             (channelizer, input_port))
+            for output_port, ((index, _frequency), channel_bin) in enumerate(
+                    zip(members, selected_bins)):
+                channel_routes[index] = (channelizer, output_port, channel_bin)
+            self.channelizers.append((translator, splitter, channelizer))
+
+        if len(channel_routes) != len(FRS_CHANNELS_HZ):
+            raise RuntimeError("sparse channelizer does not cover every FRS channel")
 
         demodulated = []
         self.channel_blocks = []  # Keep Python proxy objects alive.
         self.channel_monitor = ChannelMonitorSink(
             self.DEMOD_AUDIO_RATE, args.record_dir, self.activity_events,
             self.timeline_origin, args.channel_gain)
+        self.power_monitor = (ChannelPowerSink()
+                              if getattr(args, "self_test", False) else None)
         for number, frequency in enumerate(FRS_CHANNELS_HZ, start=1):
-            output_port = number - 1
-            port = selected_bins[output_port]
+            channelizer, output_port, port = channel_routes[number - 1]
             squelch = analog.simple_squelch_cc(args.squelch, args.squelch_alpha)
             demod = analog.nbfm_rx(
                 audio_rate=self.DEMOD_AUDIO_RATE,
@@ -936,7 +1011,10 @@ class FRSReceiver(gr.top_block):
             )
             level = blocks.multiply_const_ff(args.channel_gain)
             self.connect((channelizer, output_port), squelch, demod, level)
-            self.connect(demod, (self.channel_monitor, output_port))
+            if self.power_monitor is not None:
+                self.connect((channelizer, output_port),
+                             (self.power_monitor, number - 1))
+            self.connect(demod, (self.channel_monitor, number - 1))
             self.channel_blocks.append(
                 (number, port, squelch, demod, level))
             demodulated.append(level)
@@ -979,6 +1057,10 @@ class FRSReceiver(gr.top_block):
 
     def processed_seconds(self):
         return self.channel_monitor.processed / self.DEMOD_AUDIO_RATE
+
+    def channel_powers_db(self):
+        return (list(self.power_monitor.levels_db)
+                if self.power_monitor is not None else None)
 
 
 class ConversationWaterfall(QtWidgets.QWidget):
@@ -1807,6 +1889,9 @@ def main():
         args.no_audio = True
         args.record_dir = ""
         args.run_seconds = args.run_seconds or 4.0
+        if not any(argument == "--squelch" or argument.startswith("--squelch=")
+                   for argument in sys.argv[1:]):
+            args.squelch = -84.0
 
     app = None
     if args.gui:
@@ -1881,7 +1966,20 @@ def main():
         if args.self_test:
             processed_seconds = receiver.processed_seconds()
             print(f"Synthetic RF processed: {processed_seconds:.2f}s of IQ")
-            passed = levels[0] > 1e-3 and levels[7] > 1e-4 and levels[14] < 1e-5
+            powers = receiver.channel_powers_db()
+            print("Channel RF dB:", " ".join(
+                f"{number}:{power:.1f}" for number, power
+                in enumerate(powers, 1)
+                if power > -100 or number in (1, 2, 15, 16)
+            ))
+            adjacent_passed = levels[0] > 1e-3 and levels[14] < 1e-5
+            print(
+                "ADJACENT ISOLATION:",
+                "PASS" if adjacent_passed else "FAIL",
+                f"(ch1 {levels[0]:.5f}, ch15 {levels[14]:.5f}; "
+                "12.5 kHz spacing, 50 dB RF imbalance)",
+            )
+            passed = adjacent_passed and levels[7] > 1e-4
             print("SELF-TEST:", "PASS" if passed else "FAIL")
             if not passed:
                 return 1

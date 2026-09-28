@@ -1,0 +1,148 @@
+name: SDR hardware-in-loop
+
+on:
+  # Manual only. Do not put deployment, reboot, or board I/O on push/PR events.
+  workflow_dispatch:
+    inputs:
+      probe_board:
+        description: Read-only USB SSH inventory of the booted Z7020/AD9363 board
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdr-hil-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: FPGA regression and HIL manifest (no device access)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install simulator
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y iverilog
+
+      - name: Run FPGA regression and record log
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/sdr-hil-preflight
+          make fpga-test 2>&1 | tee work/sdr-hil-preflight/fpga-test.log
+
+      - name: Package reproducible DSP evidence (not bootable)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle=work/sdr-hil-preflight/dsp-evidence
+          mkdir -p "$bundle"
+          # Preserve the exact portable RTL, coefficients, and fixed vectors
+          # needed to reproduce the DSP checks. This is not a bitstream or boot
+          # image and contains no device programming/reboot utility.
+          cp -a fpga "$bundle/"
+          find "$bundle" -type f -print0 | sort -z | xargs -0 sha256sum \
+            > work/sdr-hil-preflight/SHA256SUMS
+          tar -C work/sdr-hil-preflight -czf work/sdr-hil-preflight/dsp-evidence.tar.gz dsp-evidence
+
+      - name: Record non-deployable preflight manifest
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/sdr-hil-preflight
+          cat > work/sdr-hil-preflight/manifest.txt <<EOF
+          SDR HIL preflight artifact (not a boot image and not deployable)
+          Repository: ${GITHUB_REPOSITORY}
+          Ref: ${GITHUB_REF}
+          Commit: $(git rev-parse HEAD 2>/dev/null || printf 'checkout unavailable')
+          Run ID: ${GITHUB_RUN_ID}
+          Hardware access: none
+          Boot transport: unconfirmed
+          SD card: inspection only; do not write or reformat
+          Debug serial: host reported FTDI ttyUSB0/ttyUSB1; console not yet captured
+          Device mutation job: hard-disabled; optional read-only inventory only
+          Reboot/deploy/programming: disabled
+          AD9363 intake: not yet validated on hardware
+          Synthetic-IQ-to-DSP on hardware: not yet validated
+          Package: portable DSP evidence only; explicitly not bootable
+          EOF
+
+      - name: Upload preflight evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdr-hil-preflight-${{ github.run_id }}
+          path: work/sdr-hil-preflight/
+          if-no-files-found: warn
+          retention-days: 30
+
+  board-inventory:
+    name: Read-only board and IIO inventory over USB SSH
+    if: ${{ inputs.probe_board == true }}
+    needs: preflight
+    runs-on: [self-hosted, Linux, X64, vivado]
+    timeout-minutes: 5
+    environment: sdr-hardware
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Probe booted board without changing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ci/sdr-hil-inventory.sh work/sdr-hil-inventory
+
+      - name: Summarize read-only board inventory
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f work/sdr-hil-inventory/inventory.txt ]]; then
+            {
+              echo '## Read-only SDR board inventory'
+              echo '```text'
+              cat work/sdr-hil-inventory/inventory.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload board inventory evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdr-hil-inventory-${{ github.run_id }}
+          path: work/sdr-hil-inventory/
+          if-no-files-found: warn
+          retention-days: 30
+
+  hardware-cycle:
+    name: Device boot/reboot/fetch and receive checks (not enabled)
+    # Keep hard-disabled until the exact boot mode, transport, board endpoint,
+    # FPGA test-control path, and safely isolated runner are confirmed.
+    if: ${{ false }}
+    needs: preflight
+    runs-on: [self-hosted, Linux, X64, sdr-hil]
+    timeout-minutes: 30
+    environment: sdr-hardware
+    steps:
+      - name: Intentionally disabled until board access is confirmed
+        run: |
+          echo "No device operations are configured. No files were deployed and no board was rebooted."
+          exit 1
+
+      # Future steps require a separate reviewed change and a safe transport,
+      # known-good recovery image, board identity, and explicit run-time consent.
+      # See fpga/plutosky_r2/README.md for the staged checklist. Keep this job
+      # disabled until every gate is satisfied; never mutate the SD card here.

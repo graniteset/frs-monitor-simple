@@ -29,3 +29,9 @@ sessions/
 *.swp
 *.swo
 *~
+
+# Local synthesis/simulation logs
+abc.history
+vivado*.jou
+vivado*.log
+.Xil/
