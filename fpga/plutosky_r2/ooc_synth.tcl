@@ -1,5 +1,5 @@
 # Reproducible out-of-context synthesis of the portable FRS DSP core for the
-# PlutoSky R2 Zynq-7020. Run from the repository root with:
+# CLG400 Zynq-7020 variant. Run from the repository root with:
 #   /opt/Xilinx/2026.1/Vivado/bin/vivado -mode batch -nolog -nojournal \
 #     -source fpga/plutosky_r2/ooc_synth.tcl
 # Reports/checkpoint are written only to ignored work/ (or FRS_OOC_OUT).
@@ -17,9 +17,9 @@ if {[info exists ::env(FRS_OOC_OUT)]} {
 }
 file mkdir $out_dir
 
-set part xc7z020clg484-2
+set part xc7z020clg400-2
 if {[llength [get_parts -quiet $part]] == 0} {
-  error "Target part '$part' is not present in this Vivado installation. Install Zynq-7000 device support (Vivado Help > Add Design Tools or Devices), then rerun. The part name matches the vendor PlutoSky R2 project; do not silently substitute a different speed grade."
+  error "Target part '$part' is not present in this Vivado installation. Install Zynq-7000 device support (Vivado Help > Add Design Tools or Devices), then rerun. This target is selected from the board's CLG400 package marking and the vendor's CLG400 project; do not silently substitute another package or speed grade."
 }
 set rtl_files [list \
   fpga/band_ddc_decimator.sv \
@@ -68,6 +68,10 @@ report_timing_summary -delay_type max -report_unconstrained \
 report_timing -delay_type max -max_paths 20 \
   -file [file join $out_dir timing_paths.rpt]
 report_clock_utilization -file [file join $out_dir clock_utilization.rpt]
+# Vectorless estimate only: no SAIF/VCD activity or placed board-level I/O is
+# supplied. Treat dynamic power as indicative; use a measured/annotated trace
+# and a complete placed design for a board-relevant estimate.
+report_power -file [file join $out_dir power_estimate.rpt]
 write_checkpoint -force [file join $out_dir frs_receive_core_ooc.dcp]
 
 puts "FRS OOC synthesis complete. Reports: $out_dir"
