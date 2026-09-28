@@ -18,6 +18,8 @@ benchmark:
 fpga-test:
 	iverilog -g2012 -s tb_iq_stream -o /tmp/frs_tb_iq_stream fpga/iq_test_source.sv fpga/axis_iq_mux.sv fpga/tb_iq_stream.sv
 	vvp /tmp/frs_tb_iq_stream
+	iverilog -g2012 -s tb_ad9361_rx_adapter -o /tmp/frs_tb_ad9361_rx_adapter fpga/frs_ad9361_rx_adapter.sv fpga/tb_ad9361_rx_adapter.sv
+	vvp /tmp/frs_tb_ad9361_rx_adapter
 	iverilog -g2012 -s tb_frs_plutosky_r2_stream -o /tmp/frs_tb_plutosky_r2_stream fpga/iq_test_source.sv fpga/axis_iq_mux.sv fpga/plutosky_r2/frs_plutosky_r2_stream.sv fpga/plutosky_r2/tb_frs_plutosky_r2_stream.sv
 	vvp /tmp/frs_tb_plutosky_r2_stream
 	iverilog -g2012 -s tb_band_ddc -o /tmp/frs_tb_band_ddc fpga/band_ddc_decimator.sv fpga/tb_band_ddc.sv
