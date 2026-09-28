@@ -47,6 +47,7 @@ module frs_multi_channel_audio #(
     localparam [4:0] FRONT_POWER_EMA = 5'd14;
     localparam [4:0] FRONT_POWER_NEXT = 5'd15;
     localparam [4:0] FRONT_POWER_GATE = 5'd16;
+    localparam [4:0] FRONT_FM_SATURATE = 5'd17;
     localparam [2:0] FIR_IDLE = 3'd0;
     localparam [2:0] FIR_MAC = 3'd1;
     localparam [2:0] FIR_DRAIN = 3'd2;
@@ -117,6 +118,7 @@ module frs_multi_channel_audio #(
     reg signed [32:0] front_disc_dot;
     reg signed [32:0] front_disc_cross;
     reg signed [17:0] front_final_cordic_z;
+    reg signed [19:0] front_fm_scaled_sample;
     reg signed [15:0] front_fm_sample;
     reg signed [33:0] front_deemph_current_product;
     reg signed [33:0] front_deemph_previous_product;
@@ -318,6 +320,7 @@ module frs_multi_channel_audio #(
             front_disc_dot <= 33'sd0;
             front_disc_cross <= 33'sd0;
             front_final_cordic_z <= 18'sd0;
+            front_fm_scaled_sample <= 20'sd0;
             front_fm_sample <= 16'sd0;
             front_deemph_current_product <= 34'sd0;
             front_deemph_previous_product <= 34'sd0;
@@ -464,11 +467,15 @@ module frs_multi_channel_audio #(
                 end
             end
 
-            // Post-CORDIC arithmetic is staged so the final z/scale result,
-            // deemphasis products, product sums, quantization, and FIFO RAM
-            // write do not share a long path to the distributed FIFO.
+            // Post-CORDIC arithmetic is staged: keep the DSP scale/shift
+            // result separate from saturation and the deemphasis pipeline.
             if (front_state == FRONT_FM_SCALE) begin
-                front_fm_sample <= saturate_q15(fm_demod_q15_wide);
+                front_fm_scaled_sample <= fm_demod_q15_wide;
+                front_state <= FRONT_FM_SATURATE;
+            end
+
+            if (front_state == FRONT_FM_SATURATE) begin
+                front_fm_sample <= saturate_q15(front_fm_scaled_sample);
                 front_state <= FRONT_DEEMPH_MUL;
             end
 
