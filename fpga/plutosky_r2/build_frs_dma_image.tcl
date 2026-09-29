@@ -135,7 +135,50 @@ connect_bd_net [get_bd_pins sys_ps7/FCLK_CLK0] $dma_fifo_clk
 
 validate_bd_design
 save_bd_design
+
+# The vendor project arrives with AXI_AD9361 output products generated from
+# its unmodified IP catalog. Merely adding our private catalog overlay to
+# ip_repo_paths does not invalidate that already-generated OOC checkpoint.
+# Reset only this IP's products in the disposable candidate and regenerate it
+# before the block design, so implementation cannot silently reuse the BUFG-only
+# receive capture netlist.
+set ad9361_xci [get_files -all -quiet -filter {NAME =~ "*/system_axi_ad9361_0.xci"}]
+if {[llength $ad9361_xci] != 1} {
+  error "Expected exactly one disposable AXI_AD9361 XCI, found: $ad9361_xci"
+}
+reset_target all $ad9361_xci
+generate_target all $ad9361_xci
 generate_target all $bd_file
+
+# Assert the generated candidate sources actually came from the BUFIO overlay.
+# This check deliberately runs before synthesis/route; the source archive and
+# source project remain untouched, and a stale/custom-IP cache becomes a clear
+# build failure rather than a misleading timing result.
+set ip_shared_dir [file join $candidate_dir frs_clg400_frs.ip_user_files bd system ipshared]
+set generated_clock_file [file join $ip_shared_dir xilinx common ad_data_clk.v]
+set generated_lvds_files [glob -nocomplain [file join $ip_shared_dir * xilinx axi_ad9361_lvds_if.v]]
+if {![file isfile $generated_clock_file]} {
+  error "Generated ADI shared clock source is missing: $generated_clock_file"
+}
+if {[llength $generated_lvds_files] != 1} {
+  error "Expected one generated AXI_AD9361 LVDS source under $ip_shared_dir; found: $generated_lvds_files"
+}
+set clock_fd [open $generated_clock_file r]
+set clock_source [read $clock_fd]
+close $clock_fd
+set lvds_file [lindex $generated_lvds_files 0]
+set lvds_fd [open $lvds_file r]
+set lvds_source [read $lvds_fd]
+close $lvds_fd
+set bufio_count [regexp -all -- {(?m)^\s*BUFIO\s+i_rx_clk_bufio\s*\(} $clock_source]
+set clk_io_port_count [regexp -all -- {(?m)^\s*output\s+clk_io\s*\);} $clock_source]
+set rx_clk_io_count [regexp -all -- {\.rx_clk\s*\(\s*l_clk_io\s*\)} $lvds_source]
+set stale_rx_clk_count [regexp -all -- {\.rx_clk\s*\(\s*l_clk\s*\)} $lvds_source]
+if {$bufio_count != 1 || $clk_io_port_count != 1 ||
+    $rx_clk_io_count != 2 || $stale_rx_clk_count != 0} {
+  error "Generated AXI_AD9361 sources do not use the required BUFIO RX capture clock: BUFIO=$bufio_count clk_io_ports=$clk_io_port_count RX_l_clk_io=$rx_clk_io_count RX_l_clk=$stale_rx_clk_count"
+}
+puts "Verified generated AXI_AD9361 RX IDDRs use the BUFIO capture clock."
 update_compile_order -fileset sources_1
 
 # Disable the unrelated ZC702 package-pin map, retain the CLG400 board pins,
@@ -144,13 +187,6 @@ set zc702_xdcs [get_files -all -quiet -filter {NAME =~ "*projects/common/zc702/z
 if {[llength $zc702_xdcs] != 1} { error "Expected one generic ZC702 XDC." }
 set_property IS_ENABLED false $zc702_xdcs
 set timing_xdc [file join $script_dir clg400_ad936x_provisional_io_timing.xdc]
-# Discard a stale copy inherited from a previously saved desktop project. The
-# Vivado project must use the checked-out constraint file for this exact build.
-foreach existing_xdc [get_files -all -quiet -of_objects [get_filesets constrs_1]] {
-  if {[file tail [get_property NAME $existing_xdc]] eq [file tail $timing_xdc]} {
-    remove_files -fileset constrs_1 $existing_xdc
-  }
-}
 add_files -fileset constrs_1 -norecurse $timing_xdc
 set timing_file [get_files -all -quiet $timing_xdc]
 set_property IS_ENABLED true $timing_file
