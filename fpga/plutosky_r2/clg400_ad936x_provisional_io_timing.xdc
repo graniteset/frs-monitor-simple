@@ -15,12 +15,13 @@
 #   * The matching Linux DT programs RX data delay=4, TX FB-clock delay=7, and
 #     TX data delay=9. AN-1441 describes ~0.3 ns/LSB, so these are modeled as
 #     explicit source/sink phase offsets below (RX +1.2 ns; TX relative +0.6ns).
-#   * The CLG400 BD sets ADC_INIT_DELAY=23. The ADI IDELAYE2 is VAR_LOAD and
-#     its RTL initial tap count is written at runtime, so routed STA otherwise
-#     sees only the tap-0 delay. Model the startup value as 23 * 0.078 ns in the
-#     input-delay budget. This is only the startup value: Linux's digital
-#     interface tuner may later change the tap, and that runtime range is not
-#     represented by this static timing constraint.
+#   * The CLG400 BD sets ADC_INIT_DELAY=23. The ADI design loads this value into
+#     the FPGA IDELAYE2 after IDELAYCTRL locks, and exposes the delay to software
+#     for later tuning. The primitive is VAR_LOAD with IDELAY_VALUE=0 in RTL,
+#     so ordinary static timing may model the tap-0 arc even though runtime
+#     CNTVALUEIN is 23. Provisionally account for the startup setting in the
+#     input delay budget; the reported timing must be checked against the actual
+#     per-tap delay and runtime setting before signoff.
 #   * Unmeasured board data-vs-clock route skew is provisionally bounded at
 #     +/-0.25 ns. Replace this with PCB extraction or measured margin later.
 #   * Only positive differential ports are timed; Vivado treats the paired
@@ -85,11 +86,15 @@ create_generated_clock -name tx_fb_clk -source [get_ports rx_clk_in_p] \
   -divide_by 1 -invert [get_ports tx_clk_out_p]
 
 set tx_data_ports [get_ports {tx_data_out_p[*] tx_data_out_n[*] tx_frame_out_p tx_frame_out_n}]
-# TX_DATA_DELAY=9 exceeds FB_CLK_DELAY=7 by 2 LSBs, so the AD9363 delays its
-# data relative to the capture clock by approximately 0.6 ns. Represent the
-# resulting setup/hold budget at the pins. Revisit if Linux changes these regs.
+# ADI AN-1441 specifies TX setup/hold relative to FB_CLK's falling edge for
+# TX_DATA and TX_FRAME (tSTX=1 ns, tHTX=0 ns); do not add a duplicate rising-edge
+# constraint. TX_DATA_DELAY=9 exceeds FB_CLK_DELAY=7 by 2 LSBs, so data is
+# delayed relative to the capture clock by approximately +0.6 ns. In the
+# output-delay equations, the minimum uses data-min minus clock-max (opposite
+# board-skew sign to the maximum), while this chip phase is positive for both.
+# Revisit if Linux changes these registers or board skew is measured.
 set tx_phase_ns [expr {(9 - 7) * $ad936x_delay_lsb_ns}]
 set tx_out_max_ns [expr {1.000 + $assumed_board_skew_ns + $tx_phase_ns}]
-set tx_out_min_ns [expr {0.000 - $assumed_board_skew_ns - $tx_phase_ns}]
+set tx_out_min_ns [expr {0.000 - $assumed_board_skew_ns + $tx_phase_ns}]
 set_output_delay -clock tx_fb_clk -clock_fall -max $tx_out_max_ns $tx_data_ports
 set_output_delay -clock tx_fb_clk -clock_fall -min $tx_out_min_ns $tx_data_ports
