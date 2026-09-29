@@ -190,6 +190,7 @@ jobs:
             if python3 ci/check_vivado_route_reports.py \
                 --timing "$profile_dir/reports/frs_impl_timing.rpt" \
                 --drc "$profile_dir/reports/frs_impl_drc.rpt" \
+                --constraints fpga/plutosky_r2/clg400_ad936x_provisional_io_timing.xdc \
                 --summary "$profile_dir/timing-gate.txt"; then
               echo "Routed timing/DRC gates passed for $profile." | tee "$profile_dir/result.txt"
             else
