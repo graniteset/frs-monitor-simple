@@ -11,14 +11,56 @@ PATCH_TCL = REPO / "fpga/plutosky_r2/apply_clg400_bufio_capture.tcl"
 
 
 class Clg400BufioPatchTests(unittest.TestCase):
-    def make_adi_fixture(self, root: Path) -> tuple[Path, bytes, bytes]:
+    def make_adi_fixture(
+        self, root: Path, *, modern_header: bool = False, prepatched: bool = False
+    ) -> tuple[Path, bytes, bytes]:
         catalog = root / "work" / "adi-source"
         clock = catalog / "xilinx/common/ad_data_clk.v"
         lvds = catalog / "axi_ad9361/xilinx/axi_ad9361_lvds_if.v"
         clock.parent.mkdir(parents=True)
         lvds.parent.mkdir(parents=True)
-        clock.write_text(
-            """module ad_data_clk (
+        if prepatched:
+            clock_declaration = """module ad_data_clk #(
+  parameter SINGLE_ENDED = 0
+) (
+  input clk_in_p,
+  input clk_in_n,
+  output clk,
+  output clk_io
+);
+  wire clk_ibuf_s;
+  IBUFDS i_rx_clk_ibuf (
+    .I (clk_in_p),
+    .IB (clk_in_n),
+    .O (clk_ibuf_s));
+  BUFIO i_rx_clk_bufio (
+    .I (clk_ibuf_s),
+    .O (clk_io));
+  BUFG i_clk_gbuf (
+    .I (clk_ibuf_s),
+    .O (clk));
+endmodule
+"""
+        elif modern_header:
+            clock_declaration = """module ad_data_clk #(
+  parameter SINGLE_ENDED = 0
+) (
+  input clk_in_p,
+  input clk_in_n,
+  output clk
+);
+  wire clk_ibuf_s;
+  IBUFGDS i_rx_clk_ibuf (
+    .I (clk_in_p),
+    .IB (clk_in_n),
+    .O (clk_ibuf_s));
+  BUFG i_clk_gbuf (
+    .I (clk_ibuf_s),
+    .O (clk));
+endmodule
+"""
+        else:
+            clock_declaration = """module ad_data_clk (
   input clk_in_p,
   input clk_in_n,
   output              clk);
@@ -39,7 +81,9 @@ class Clg400BufioPatchTests(unittest.TestCase):
     .I (clk_ibuf_s),
     .O (clk));
 endmodule
-""",
+"""
+        clock.write_text(
+            clock_declaration,
             encoding="utf-8",
         )
         lvds.write_text(
@@ -95,6 +139,27 @@ endmodule
                 (catalog / "axi_ad9361/xilinx/axi_ad9361_lvds_if.v").read_bytes(),
                 original_lvds,
             )
+
+    def test_handles_current_plutosky_split_line_port_declaration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work = root / "work"
+            catalog, _, _ = self.make_adi_fixture(root, modern_header=True)
+            overlay = self.run_patch(catalog, work)
+            clock = (overlay / "xilinx/common/ad_data_clk.v").read_text()
+            self.assertIn("  output clk,\n  output              clk_io\n);", clock)
+            self.assertIn("BUFIO i_rx_clk_bufio", clock)
+
+    def test_accepts_and_preserves_an_already_patched_staged_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work = root / "work"
+            catalog, _, _ = self.make_adi_fixture(root, prepatched=True)
+            original_clock = (catalog / "xilinx/common/ad_data_clk.v").read_bytes()
+            overlay = self.run_patch(catalog, work)
+            patched_clock = overlay / "xilinx/common/ad_data_clk.v"
+            self.assertEqual(patched_clock.read_bytes(), original_clock)
+            self.assertEqual((catalog / "xilinx/common/ad_data_clk.v").read_bytes(), original_clock)
 
     def test_rejects_unexpected_adi_source_layout_without_mutating_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
