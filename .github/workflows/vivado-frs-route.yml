@@ -1,0 +1,162 @@
+name: Vivado FRS routed builds
+
+on:
+  # Never execute repository code on the licensed desktop for pushes or PRs.
+  # Select an explicitly reviewed branch and type its dispatch SHA below.
+  workflow_dispatch:
+    inputs:
+      confirm_sha:
+        description: Type the full commit SHA shown for the selected branch.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vivado-frs-route-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  route-both-profiles:
+    name: Route live-RX and synthetic-IQ profiles
+    runs-on: [self-hosted, Linux, X64, vivado]
+    environment: vivado-ooc
+    timeout-minutes: 240
+    env:
+      VIVADO_BIN: /opt/Xilinx/2026.1/Vivado/bin/vivado
+    steps:
+      - name: Verify the explicitly selected reviewed branch and commit
+        shell: bash
+        env:
+          CONFIRM_SHA: ${{ inputs.confirm_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_TYPE" == "branch" ]] || {
+            echo "Only an explicitly selected branch is permitted." >&2
+            exit 1
+          }
+          [[ "$CONFIRM_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || {
+            echo "confirm_sha must be a full 40-character commit SHA." >&2
+            exit 1
+          }
+          [[ "${CONFIRM_SHA,,}" == "${GITHUB_SHA,,}" ]] || {
+            echo "Typed SHA does not match the selected workflow_dispatch commit." >&2
+            exit 1
+          }
+          echo "Selected ref: $GITHUB_REF"
+          echo "Selected commit: $GITHUB_SHA"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify Vivado installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -x "$VIVADO_BIN" ]] || { echo "Vivado is unavailable: $VIVADO_BIN" >&2; exit 1; }
+          "$VIVADO_BIN" -version
+
+      - name: Validate and stage runner-provisioned inputs
+        id: stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/prepare_vivado_route_inputs.py \
+            --workspace "$GITHUB_WORKSPACE" \
+            --vendor-project "${FRS_VENDOR_STAGE_ROOT:-}" \
+            --vendor-sha256 "${FRS_VENDOR_STAGE_SHA256:-}" \
+            --legacy-root "${FRS_VENDOR_LEGACY_ROOT:-}" \
+            --adi-ip-repo "${FRS_ADI_IP_REPO:-}" \
+            --adi-sha256 "${FRS_ADI_IP_REPO_SHA256:-}" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Build, route, and gate both profiles
+        id: build
+        shell: bash
+        env:
+          STAGED_VENDOR_XPR: ${{ steps.stage.outputs.STAGED_VENDOR_XPR }}
+          STAGED_ADI_IP_REPO: ${{ steps.stage.outputs.STAGED_ADI_IP_REPO }}
+          VENDOR_INPUT_SHA256: ${{ steps.stage.outputs.VENDOR_INPUT_SHA256 }}
+          ADI_INPUT_SHA256: ${{ steps.stage.outputs.ADI_INPUT_SHA256 }}
+        run: |
+          set -euo pipefail
+          build_root="$GITHUB_WORKSPACE/work/vivado-frs-route"
+          mkdir -p "$build_root"
+          any_failed=0
+
+          for mode in 1 0; do
+            if [[ "$mode" == 1 ]]; then profile=synthetic-iq; else profile=live-rx; fi
+            profile_dir="$build_root/$profile"
+            mkdir -p "$profile_dir"
+            echo "Building FRS_TEST_MODE=$mode ($profile) at $GITHUB_SHA"
+
+            set +e
+            FRS_VENDOR_XPR="$STAGED_VENDOR_XPR" \
+            FRS_ADI_IP_REPO="$STAGED_ADI_IP_REPO" \
+            FRS_TEST_MODE="$mode" \
+              "$VIVADO_BIN" -mode batch -nolog -nojournal \
+                -log "$profile_dir/vivado.log" \
+                -journal "$profile_dir/vivado.jou" \
+                -source fpga/plutosky_r2/build_frs_dma_image.tcl \
+                > "$profile_dir/console.log" 2>&1
+            vivado_status=$?
+            set -e
+
+            if (( vivado_status != 0 )); then
+              echo "Vivado failed for $profile (exit $vivado_status)." | tee "$profile_dir/result.txt"
+              any_failed=1
+              continue
+            fi
+
+            candidate_xpr=$(sed -n 's/^FRS_CANDIDATE_XPR=//p' "$profile_dir/console.log" | tail -n 1)
+            bitstream=$(sed -n 's/^FRS_BITSTREAM=//p' "$profile_dir/console.log" | tail -n 1)
+            if [[ -z "$candidate_xpr" || -z "$bitstream" || ! -f "$candidate_xpr" || ! -f "$bitstream" ]]; then
+              echo "Vivado returned success but did not identify its candidate project and bitstream." | tee "$profile_dir/result.txt"
+              any_failed=1
+              continue
+            fi
+            reports="$(dirname "$candidate_xpr")/reports"
+            reports_ok=1
+            for report in frs_impl_timing.rpt frs_impl_drc.rpt frs_impl_utilization.rpt frs_impl_power.rpt; do
+              if [[ ! -s "$reports/$report" ]]; then
+                echo "Required report missing or empty: $reports/$report" | tee "$profile_dir/result.txt"
+                any_failed=1
+                reports_ok=0
+              fi
+            done
+            if (( reports_ok == 0 )); then continue; fi
+            mkdir -p "$profile_dir/reports"
+            cp -a "$reports/." "$profile_dir/reports/"
+            cp -- "$bitstream" "$profile_dir/system_top.bit"
+            printf 'FRS_TEST_MODE=%s\nCANDIDATE_XPR=%s\nSOURCE_SHA=%s\n' \
+              "$mode" "$candidate_xpr" "$GITHUB_SHA" > "$profile_dir/build-metadata.txt"
+            printf 'VENDOR_INPUT_SHA256=%s\nADI_INPUT_SHA256=%s\n' \
+              "$VENDOR_INPUT_SHA256" "$ADI_INPUT_SHA256" >> "$profile_dir/build-metadata.txt"
+
+            if python3 ci/check_vivado_route_reports.py \
+                --timing "$profile_dir/reports/frs_impl_timing.rpt" \
+                --drc "$profile_dir/reports/frs_impl_drc.rpt" \
+                --summary "$profile_dir/timing-gate.txt"; then
+              echo "Routed timing/DRC gates passed for $profile." | tee "$profile_dir/result.txt"
+            else
+              echo "Routed timing/DRC gates failed for $profile." | tee "$profile_dir/result.txt"
+              any_failed=1
+            fi
+
+            (cd "$profile_dir" && sha256sum system_top.bit reports/* > SHA256SUMS)
+          done
+
+          echo "route_gate_failed=$any_failed" >> "$GITHUB_OUTPUT"
+          exit "$any_failed"
+
+      - name: Upload routed build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vivado-frs-route-${{ github.run_id }}-${{ github.sha }}
+          path: work/vivado-frs-route/
+          if-no-files-found: warn
+          retention-days: 30

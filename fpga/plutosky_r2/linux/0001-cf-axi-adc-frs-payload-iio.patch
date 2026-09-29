@@ -1,0 +1,73 @@
+From 2f917b4d2d3f Mon Sep 17 00:00:00 2001
+Subject: [PATCH] iio: cf_axi_adc: expose packed FRS DMA as generic 64-bit data
+
+This opt-in property is used only by the custom FRS device tree. The stock
+Pluto device tree and cf-ad9361-lpc voltage scan channels are unchanged.
+---
+ drivers/iio/adc/cf_axi_adc_core.c | 39 +++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 34 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/iio/adc/cf_axi_adc_core.c b/drivers/iio/adc/cf_axi_adc_core.c
+--- a/drivers/iio/adc/cf_axi_adc_core.c
++++ b/drivers/iio/adc/cf_axi_adc_core.c
+@@ -60,5 +60,6 @@ struct axiadc_state {
+ 	bool				dp_disable;
+ 	bool				ext_sync_avail;
++	bool				frs_payload;
+ 
+ 	struct iio_chan_spec		channels[AXIADC_MAX_CHANNEL];
+ };
+@@ -803,8 +804,29 @@ static int axiadc_channel_setup(struct iio_dev *indio_dev,
+ 				const struct iio_chan_spec *adc_channels,
+-				unsigned adc_chan_num)
++				unsigned adc_chan_num, bool frs_payload)
+ {
+ 	struct axiadc_state *st = iio_priv(indio_dev);
+ 	unsigned i, cnt, usr_ctrl;
+ 
++	if (frs_payload) {
++		/*
++		 * One DMA scan element is one complete little-endian 64-bit FRS
++		 * record-pair word. It is opaque protocol data, not an AD936x
++		 * voltage/IQ measurement. The userspace decoder owns its fields.
++		 */
++		st->channels[0].type = IIO_GENERIC_DATA;
++		st->channels[0].indexed = 1;
++		st->channels[0].channel = 0;
++		st->channels[0].scan_index = 0;
++		st->channels[0].extend_name = "frs_record_pair";
++		st->channels[0].scan_type.sign = 'u';
++		st->channels[0].scan_type.realbits = 64;
++		st->channels[0].scan_type.storagebits = 64;
++		st->channels[0].scan_type.shift = 0;
++		st->channels[0].scan_type.endianness = IIO_LE;
++		indio_dev->channels = st->channels;
++		indio_dev->num_channels = 1;
++		return 0;
++	}
++
+ 	st->max_usr_channel = ADI_USR_CHANMAX(axiadc_read(st, ADI_REG_USR_CNTRL_1));
+ 	st->max_usr_channel = 0; /* FIXME */
+@@ -1188,9 +1209,17 @@ static int axiadc_probe(struct platform_device *pdev)
+ 	indio_dev->dev.parent = &pdev->dev;
+-	indio_dev->name = pdev->dev.of_node->name;
++	st->frs_payload = of_property_read_bool(pdev->dev.of_node,
++						"graniteset,frs-packed-audio-v1");
++	indio_dev->name = st->frs_payload ? "frs-audio" : pdev->dev.of_node->name;
+ 	indio_dev->modes = INDIO_DIRECT_MODE;
+-	indio_dev->available_scan_masks = conv->chip_info->scan_masks;
++	if (st->frs_payload) {
++		static const unsigned long frs_scan_masks[] = { BIT(0), 0 };
++		indio_dev->available_scan_masks = frs_scan_masks;
++	} else {
++		indio_dev->available_scan_masks = conv->chip_info->scan_masks;
++	}
+ 
+ 	axiadc_channel_setup(indio_dev, conv->chip_info->channel,
+-			     st->dp_disable ? 0 : conv->chip_info->num_channels);
++			     st->dp_disable ? 0 : conv->chip_info->num_channels,
++			     st->frs_payload);
+ 
+ 	st->iio_info = axiadc_info;
+-- 
+2.46.0

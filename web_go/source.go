@@ -19,10 +19,12 @@ const (
 	maxFrames         = 12000
 	maxAudioChunks    = 400
 	maxHistoryRows    = 1600
+	maxChannelChunks  = 32000 // Approximately 29 s across 22 channels at 20 ms/chunk.
 )
 
-// Source is the seam between the HTTP/dashboard layer and any future receiver.
-// Hardware DMA is intentionally not implemented until its ABI is known.
+// Source is the seam between the HTTP/dashboard layer and each receiver.
+// Synthetic/fixture sources and the FPGA DMA/IIO adapter publish through the
+// same dashboard contract.
 type Source interface {
 	Summary() Snapshot
 	Updates(after int64, since float64) ([]Frame, []Record, Timeline)
@@ -44,6 +46,15 @@ type Frame struct {
 type Chunk struct {
 	Seq int64  `json:"seq"`
 	PCM []byte `json:"pcm"`
+}
+
+// ChannelChunk is a short signed-16LE mono segment from one hardware channel.
+// Start is Unix time; samples are at Hub.AudioRate.
+type ChannelChunk struct {
+	Seq     int64
+	Channel int
+	Start   float64
+	PCM     []byte
 }
 
 type Record struct {
@@ -98,6 +109,7 @@ type Hub struct {
 	frames                []Frame
 	records               []Record
 	audio                 []Chunk
+	channelAudio          []ChannelChunk
 	squelch               float64
 	closed                bool
 	started               time.Time
@@ -175,6 +187,20 @@ func (h *Hub) AddRecord(r Record) error {
 	sort.SliceStable(h.records, func(i, j int) bool { return h.records[i].Start < h.records[j].Start })
 	return nil
 }
+func (h *Hub) EndRecord(id int64, end float64) {
+	if !finite(end) {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for n := range h.records {
+		if h.records[n].ID == id && h.records[n].End == nil && end >= h.records[n].Start {
+			v := end
+			h.records[n].End = &v
+			return
+		}
+	}
+}
 func (h *Hub) AddAudio(c Chunk) error {
 	if c.Seq < 1 || len(c.PCM) == 0 || len(c.PCM)%2 != 0 {
 		return errors.New("invalid PCM chunk")
@@ -187,6 +213,34 @@ func (h *Hub) AddAudio(c Chunk) error {
 	}
 	h.cond.Broadcast()
 	return nil
+}
+
+func (h *Hub) AddChannelAudio(c ChannelChunk) error {
+	if c.Seq < 1 || c.Channel < 1 || c.Channel > 22 || !finite(c.Start) || len(c.PCM) == 0 || len(c.PCM)%2 != 0 {
+		return errors.New("invalid channel PCM chunk")
+	}
+	h.mu.Lock()
+	h.channelAudio = append(h.channelAudio, ChannelChunk{Seq: c.Seq, Channel: c.Channel, Start: c.Start, PCM: append([]byte(nil), c.PCM...)})
+	if len(h.channelAudio) > maxChannelChunks {
+		h.channelAudio = append([]ChannelChunk(nil), h.channelAudio[len(h.channelAudio)-maxChannelChunks:]...)
+	}
+	h.cond.Broadcast()
+	h.mu.Unlock()
+	return nil
+}
+
+// ChannelAudioBetween returns retained channel chunks overlapping [start,end).
+func (h *Hub) ChannelAudioBetween(channel int, start, end float64) []ChannelChunk {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := make([]ChannelChunk, 0)
+	for _, c := range h.channelAudio {
+		chunkEnd := c.Start + float64(len(c.PCM)/2)/float64(h.audioRate)
+		if c.Channel == channel && c.Start < end && chunkEnd > start {
+			out = append(out, ChannelChunk{Seq: c.Seq, Channel: c.Channel, Start: c.Start, PCM: append([]byte(nil), c.PCM...)})
+		}
+	}
+	return out
 }
 func (h *Hub) SetSquelch(v float64) error {
 	if !finite(v) || v < -120 || v > 0 {

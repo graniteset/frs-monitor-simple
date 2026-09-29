@@ -28,6 +28,9 @@ set rtl_rel [list \
   fpga/frs_multi_channel_audio.sv \
   fpga/frs_receive_core.sv \
   fpga/frs_ad9361_rx_adapter.sv \
+  fpga/frs_async_fifo.sv \
+  fpga/frs_fm_test_source.sv \
+  fpga/frs_ad9361_dma_bridge.sv \
   fpga/plutosky_r2/frs_plutosky_r2_stream.sv]
 set coeff_rel [list \
   fpga/coeffs/subband_q17.memh \
@@ -35,7 +38,8 @@ set coeff_rel [list \
   fpga/coeffs/channel_map_band1.memh \
   fpga/coeffs/channel_map_band2.memh \
   fpga/coeffs/channel_modulated_q17.memh \
-  fpga/coeffs/audio_q17.memh]
+  fpga/coeffs/audio_q17.memh \
+  fpga/coeffs/test_sine_q15_1024.memh]
 
 set source_paths {}
 foreach rel $rtl_rel {

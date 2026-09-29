@@ -1,0 +1,8 @@
+/*
+ * Opt-in Linux IIO metadata for the FRS custom capture bitstream.
+ * Include this in the custom PlutoSky R2 device tree only; do not add it to
+ * the stock Pluto image/device tree.
+ */
+&cf_ad9364_adc_core_0 {
+	graniteset,frs-packed-audio-v1;
+};
