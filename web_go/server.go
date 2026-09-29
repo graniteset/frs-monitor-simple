@@ -232,7 +232,7 @@ func (s *Server) channelStream(w http.ResponseWriter, r *http.Request) {
 		if snap.Archived && timeline > snap.Timeline.End {
 			return
 		}
-		pcm := s.renderPCM(int(channel), timeline, snap.AudioRate/10, snap.AudioRate, s.source.ChannelRecords(int(channel)))
+		pcm := s.renderPCM(int(channel), timeline, snap.AudioRate/10, snap.AudioRate, s.source.ChannelRecords(int(channel)), s.source.ChannelAudioBetween(int(channel), timeline, timeline+0.1))
 		if _, err := w.Write(pcm); err != nil {
 			return
 		}
@@ -314,7 +314,7 @@ func (s *Server) squelch(w http.ResponseWriter, r *http.Request) {
 	writeBytes(w, 204, "text/plain", nil)
 }
 
-func (s *Server) renderPCM(channel int, start float64, n, rate int, records []Record) []byte {
+func (s *Server) renderPCM(channel int, start float64, n, rate int, records []Record, captured ...[]ChannelChunk) []byte {
 	out := make([]byte, n*2)
 	if rate < 8000 || rate > 48000 {
 		return out
@@ -356,6 +356,22 @@ func (s *Server) renderPCM(channel int, start float64, n, rate int, records []Re
 			v1 := float64(int16(binary.LittleEndian.Uint16(data[hi*2:])))
 			v := int16(math.RoundToEven(v0 + (v1-v0)*(srcPos-float64(lo))))
 			binary.LittleEndian.PutUint16(out[dst*2:], uint16(v))
+		}
+	}
+	// Live FPGA DMA audio is retained in timestamped channel chunks instead of
+	// WAV files. Overlay it on any archived recordings for the requested window.
+	for _, group := range captured {
+		for _, c := range group {
+			first := max(0, int(math.Floor((c.Start-start)*float64(rate))))
+			last := min(n, int(math.Ceil((c.Start+float64(len(c.PCM)/2)/float64(rate)-start)*float64(rate))))
+			for dst := first; dst < last; dst++ {
+				src := int(math.RoundToEven((start + float64(dst)/float64(rate) - c.Start) * float64(rate)))
+				if src < 0 || src*2+1 >= len(c.PCM) {
+					continue
+				}
+				v := int16(binary.LittleEndian.Uint16(c.PCM[src*2:]))
+				binary.LittleEndian.PutUint16(out[dst*2:], uint16(v))
+			}
 		}
 	}
 	return out

@@ -1,10 +1,11 @@
-.PHONY: help test self-test benchmark fpga-test
+.PHONY: help test self-test benchmark fpga-test test-dma-e2e
 
 help:
 	@echo "make test       Run unit and dashboard tests"
 	@echo "make self-test  Run the synthetic-IQ DSP/squelch check"
 	@echo "make benchmark  Measure maximum DSP realtime factor"
 	@echo "make fpga-test  Simulate board-independent FPGA source/mux and receiver DSP (Icarus Verilog)"
+	@echo "make test-dma-e2e  Simulate RTL DMA words, ingest them, and check Go HTTP audio endpoints"
 
 test:
 	python3 -m unittest tests.test_web_dashboard
@@ -20,6 +21,10 @@ fpga-test:
 	vvp /tmp/frs_tb_iq_stream
 	iverilog -g2012 -s tb_ad9361_rx_adapter -o /tmp/frs_tb_ad9361_rx_adapter fpga/frs_ad9361_rx_adapter.sv fpga/tb_ad9361_rx_adapter.sv
 	vvp /tmp/frs_tb_ad9361_rx_adapter
+	iverilog -g2012 -s tb_frs_async_fifo -o /tmp/frs_tb_async_fifo fpga/frs_async_fifo.sv fpga/tb_frs_async_fifo.sv
+	vvp /tmp/frs_tb_async_fifo
+	iverilog -g2012 -s tb_frs_ad9361_dma_bridge -o /tmp/frs_tb_ad9361_dma_bridge fpga/iq_test_source.sv fpga/frs_fm_test_source.sv fpga/axis_iq_mux.sv fpga/band_ddc_decimator.sv fpga/sparse_channelizer.sv fpga/axis_rr_merge2_iq.sv fpga/complex_squelch.sv fpga/quadrature_demod.sv fpga/fm_deemphasis.sv fpga/audio_fir_decimator.sv fpga/frs_channel_audio.sv fpga/frs_multi_channel_audio.sv fpga/frs_receive_core.sv fpga/frs_async_fifo.sv fpga/frs_ad9361_rx_adapter.sv fpga/frs_ad9361_dma_bridge.sv fpga/tb_frs_ad9361_dma_bridge.sv
+	vvp /tmp/frs_tb_ad9361_dma_bridge
 	iverilog -g2012 -s tb_frs_plutosky_r2_stream -o /tmp/frs_tb_plutosky_r2_stream fpga/iq_test_source.sv fpga/axis_iq_mux.sv fpga/plutosky_r2/frs_plutosky_r2_stream.sv fpga/plutosky_r2/tb_frs_plutosky_r2_stream.sv
 	vvp /tmp/frs_tb_plutosky_r2_stream
 	iverilog -g2012 -s tb_band_ddc -o /tmp/frs_tb_band_ddc fpga/band_ddc_decimator.sv fpga/tb_band_ddc.sv
@@ -51,3 +56,6 @@ fpga-test:
 	iverilog -g2012 -s tb_frs_receive_overrun -o /tmp/frs_tb_frs_receive_overrun fpga/band_ddc_decimator.sv fpga/sparse_channelizer.sv fpga/axis_rr_merge2_iq.sv fpga/frs_multi_channel_audio.sv fpga/frs_receive_core.sv fpga/tb_frs_receive_overrun.sv
 	vvp /tmp/frs_tb_frs_receive_overrun
 	iverilog -g2012 -s frs_receive_core -o /tmp/frs_receive_core fpga/band_ddc_decimator.sv fpga/sparse_channelizer.sv fpga/axis_rr_merge2_iq.sv fpga/frs_multi_channel_audio.sv fpga/frs_receive_core.sv
+
+test-dma-e2e:
+	cd web_go && FRS_RTL_E2E=1 go test -run '^TestRTLDMAToGoHTTP$$' -count=1 -v

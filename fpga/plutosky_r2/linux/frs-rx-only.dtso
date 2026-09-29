@@ -1,0 +1,43 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * Overlay for the Pluto-derived SD image DTB, whose current model and node
+ * paths were verified in the staged firmware.  It is deliberately narrow:
+ * retain the stock AD936x RX setup, skip TX digital-interface tuning, and
+ * remove the Linux TX DDS/DMA endpoints for this receive-only application.
+ * TX LO is powered down at runtime with the ADI IIO powerdown control; the
+ * driver has no DT property that directly forces the TX LO off at probe.
+ */
+
+/ {
+	fragment@0 {
+		target-path = "/fpga-axi@0/cf-ad9361-lpc@79020000";
+		__overlay__ {
+			graniteset,frs-packed-audio-v1;
+		};
+	};
+
+	fragment@1 {
+		target-path = "/amba/spi@e0006000/ad9361-phy@0";
+		__overlay__ {
+			adi,digital-interface-tune-skip-mode = <1>;
+			adi,tx-attenuation-mdB = <89750>;
+			adi,tx-lo-powerdown-managed-enable;
+		};
+	};
+
+	fragment@2 {
+		target-path = "/fpga-axi@0/cf-ad9361-dds-core-lpc@79024000";
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@3 {
+		target-path = "/fpga-axi@0/dma@7c420000";
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+};
