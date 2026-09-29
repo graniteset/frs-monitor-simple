@@ -144,6 +144,13 @@ set zc702_xdcs [get_files -all -quiet -filter {NAME =~ "*projects/common/zc702/z
 if {[llength $zc702_xdcs] != 1} { error "Expected one generic ZC702 XDC." }
 set_property IS_ENABLED false $zc702_xdcs
 set timing_xdc [file join $script_dir clg400_ad936x_provisional_io_timing.xdc]
+# Discard a stale copy inherited from a previously saved desktop project. The
+# Vivado project must use the checked-out constraint file for this exact build.
+foreach existing_xdc [get_files -all -quiet -of_objects [get_filesets constrs_1]] {
+  if {[file tail [get_property NAME $existing_xdc]] eq [file tail $timing_xdc]} {
+    remove_files -fileset constrs_1 $existing_xdc
+  }
+}
 add_files -fileset constrs_1 -norecurse $timing_xdc
 set timing_file [get_files -all -quiet $timing_xdc]
 set_property IS_ENABLED true $timing_file

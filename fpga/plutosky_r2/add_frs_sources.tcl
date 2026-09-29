@@ -41,6 +41,24 @@ set coeff_rel [list \
   fpga/coeffs/audio_q17.memh \
   fpga/coeffs/test_sine_q15_1024.memh]
 
+# Runner-staged vendor XPRs may already contain FRS files from a previous
+# desktop build. Their $PPRDIR-relative paths can resolve back into another
+# checkout when the project is copied, leaving two modules with the same name
+# in Vivado's source set. These names are owned by this hook, so remove any
+# pre-existing entries by basename and re-add only the exact files in this
+# checkout below.
+set managed_names {}
+foreach rel [concat $rtl_rel $coeff_rel] {
+  lappend managed_names [file tail $rel]
+}
+set sources_fileset [get_filesets sources_1]
+foreach existing [get_files -all -quiet -of_objects $sources_fileset] {
+  set existing_name [get_property NAME $existing]
+  if {[lsearch -exact $managed_names [file tail $existing_name]] >= 0} {
+    remove_files -fileset sources_1 $existing
+  }
+}
+
 set source_paths {}
 foreach rel $rtl_rel {
   set path [file join $repo_root $rel]
