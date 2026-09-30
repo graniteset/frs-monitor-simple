@@ -9,6 +9,29 @@ from ci.prepare_vivado_route_inputs import check_project_references
 
 
 class VivadoInputPreparationTests(unittest.TestCase):
+    def test_ad9361_output_products_are_reset_through_parent_block_design(self) -> None:
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "fpga/plutosky_r2/build_frs_dma_image.tcl"
+        ).read_text(encoding="utf-8")
+
+        # AXI_AD9361 is nested under system.bd, so Vivado requires resetting
+        # output products via the parent BD rather than its child XCI.
+        self.assertIn("reset_target all [get_files $bd_file]", script)
+        self.assertIn("generate_target all [get_files $bd_file]", script)
+        self.assertNotRegex(script, r"reset_target\s+all\s+\$ad9361_xci")
+        self.assertLess(
+            script.index("reset_target all [get_files $bd_file]"),
+            script.index("# Assert the generated sources consumed by the candidate's synthesis products"),
+        )
+        # Assert against the .gen synthesis outputs and their generated IP
+        # metadata, not the separate .ip_user_files export copy.
+        self.assertIn("frs_clg400_frs.gen", script)
+        self.assertIn("component_xml", script)
+        self.assertIn("metadata_reference", script)
+        # Keep the fail-closed BUFIO / RX-clock source checks in the build.
+        self.assertIn("Generated AXI_AD9361 sources do not use the required BUFIO RX capture clock", script)
+
     def make_fixture(self, root: Path, local_data: bytes = b"legacy-top\n") -> tuple[Path, Path, dict[str, tuple[str, str, str]]]:
         project = root / "work" / "probe"
         sources = project / "frs_clg400_probe.srcs" / "sources_1" / "imports" / "AD936X_PL" / "projects" / "fmcomms2" / "zc702"

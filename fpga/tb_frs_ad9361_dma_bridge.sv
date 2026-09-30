@@ -271,6 +271,39 @@ module tb_frs_ad9361_dma_bridge;
             $display("channel %0d RMS-squared=%0d / %0d", report_ch,
                      active1_channel_energy[report_ch] / active1_count,
                      active2_channel_energy[report_ch] / active2_count);
+
+        // Check the ADC-domain reset contract independently of the DSP/audio
+        // checks: assert between ADC edges, then release between edges. The
+        // sticky flag must clear asynchronously, remain reset through the
+        // first two ADC edges, and only observe pair_mismatch on the third.
+        force dut.pair_mismatch = 1'b1;
+        @(posedge adc_clk);
+        #0.1;
+        if (!pair_mismatch_seen)
+            $fatal(1, "reset test setup failed: sticky mismatch flag did not set");
+        #0.1 resetn = 1'b0;
+        #0.1;
+        if (pair_mismatch_seen || dut.adc_domain_resetn)
+            $fatal(1, "ADC reset assertion did not asynchronously clear local state");
+        @(negedge adc_clk);
+        #0.1 resetn = 1'b1;
+        #0.1;
+        if (dut.adc_domain_resetn || pair_mismatch_seen)
+            $fatal(1, "ADC reset released before a synchronizing clock edge");
+        repeat (2) begin
+            @(posedge adc_clk);
+            #0.1;
+            if (pair_mismatch_seen)
+                $fatal(1, "ADC-domain sticky flag escaped reset before synchronization");
+        end
+        if (!dut.adc_domain_resetn)
+            $fatal(1, "ADC reset did not release after two ADC clock edges");
+        @(posedge adc_clk);
+        #0.1;
+        if (!pair_mismatch_seen)
+            $fatal(1, "ADC-domain sticky flag did not resume after synchronized release");
+        release dut.pair_mismatch;
+        $display("PASS: ADC reset asserts asynchronously and releases after two adc_clk edges");
         $finish;
     end
 endmodule

@@ -1,33 +1,40 @@
 from __future__ import annotations
 
-import unittest
 from pathlib import Path
+import unittest
 
 
-ROOT = Path(__file__).resolve().parents[1]
-ADD_SOURCES = (ROOT / "fpga/plutosky_r2/add_frs_sources.tcl").read_text(
-    encoding="utf-8"
-)
-BUILD = (ROOT / "fpga/plutosky_r2/build_frs_dma_image.tcl").read_text(
-    encoding="utf-8"
+BUILD_SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "fpga/plutosky_r2/build_frs_dma_image.tcl"
 )
 
 
 class VivadoSourcePathCleanupTests(unittest.TestCase):
-    def test_owned_source_and_coefficient_paths_are_replaced_before_adding(self) -> None:
-        cleanup = ADD_SOURCES.index("remove_files -fileset sources_1 $existing")
-        add_sources = ADD_SOURCES.index("add_files -norecurse -fileset sources_1 $source_paths")
-        add_coefficients = ADD_SOURCES.index("add_files -norecurse -fileset sources_1 $coeff_paths")
-        self.assertLess(cleanup, add_sources)
-        self.assertLess(cleanup, add_coefficients)
-        self.assertIn("[concat $rtl_rel $coeff_rel]", ADD_SOURCES)
-        self.assertIn("[file tail $existing_name]", ADD_SOURCES)
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.script = BUILD_SCRIPT.read_text(encoding="utf-8")
 
     def test_stale_timing_constraint_is_removed_before_current_one_is_added(self) -> None:
-        cleanup = BUILD.index("remove_files -fileset constrs_1 $existing_xdc")
-        add_timing = BUILD.index("add_files -fileset constrs_1 -norecurse $timing_xdc")
-        self.assertLess(cleanup, add_timing)
-        self.assertIn("[file tail [get_property NAME $existing_xdc]]", BUILD)
+        lookup = 'set stale_timing_xdcs [get_files -all -quiet -filter {NAME =~ "*clg400_ad936x_provisional_io_timing.xdc"}]'
+        remove = "remove_files $stale_timing_xdcs"
+        add = "add_files -fileset constrs_1 -norecurse $timing_xdc"
+
+        self.assertIn(lookup, self.script)
+        self.assertIn("if {[llength $stale_timing_xdcs]} {", self.script)
+        self.assertIn(remove, self.script)
+        self.assertLess(self.script.index(lookup), self.script.index(remove))
+        self.assertLess(self.script.index(remove), self.script.index(add))
+        self.assertIn('set timing_xdc [file join $script_dir clg400_ad936x_provisional_io_timing.xdc]', self.script)
+
+    def test_generated_clock_assertions_read_synthesis_consumed_gen_tree(self) -> None:
+        self.assertIn(
+            "frs_clg400_frs.gen sources_1 bd system ipshared", self.script
+        )
+        self.assertIn("system_axi_ad9361_0 system_axi_ad9361_0.xml", self.script)
+        self.assertIn('set metadata_reference "../../ipshared/$source_relative"', self.script)
+        self.assertNotIn("frs_clg400_frs.ip_user_files bd system ipshared", self.script)
+        self.assertIn("Generated AXI_AD9361 sources do not use the required BUFIO RX capture clock", self.script)
 
 
 if __name__ == "__main__":
