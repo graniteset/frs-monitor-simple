@@ -61,4 +61,4 @@ jobs:
         run: python3 -m unittest ci.test_ad936x_frs_rx_profile
 
       - name: Verify CLG400 BUFIO patch is isolated and source-checked
-        run: python3 -m unittest ci.test_clg400_bufio_patch
+        run: python3 -m unittest ci.test_clg400_bufio_patch ci.test_vivado_source_path_cleanup

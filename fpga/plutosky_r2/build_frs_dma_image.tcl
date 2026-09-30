@@ -135,7 +135,68 @@ connect_bd_net [get_bd_pins sys_ps7/FCLK_CLK0] $dma_fifo_clk
 
 validate_bd_design
 save_bd_design
-generate_target all $bd_file
+
+# The vendor project arrives with AXI_AD9361 output products generated from
+# its unmodified IP catalog. Merely adding our private catalog overlay to
+# ip_repo_paths does not invalidate that already-generated OOC checkpoint.
+# AXI_AD9361 is a nested IP owned by system.bd. Vivado rejects resetting that
+# XCI directly (Nested sub-designs can only be reset by their parent). Reset
+# and regenerate the parent BD in this disposable candidate instead; this
+# invalidates its child IP products and forces them to be rebuilt against the
+# private overlay catalog without editing vendor source inputs.
+reset_target all [get_files $bd_file]
+generate_target all [get_files $bd_file]
+
+# Assert the generated sources consumed by the candidate's synthesis products
+# came from the BUFIO overlay. Inspect the .gen source tree (not .ip_user_files,
+# which is a separate client/export copy and can remain stale after generation).
+# Also confirm the generated AXI_AD9361 component metadata points at these
+# exact files. This fails closed before synth/route while leaving vendor inputs
+# untouched.
+set ip_shared_dir [file join $candidate_dir frs_clg400_frs.gen sources_1 bd system ipshared]
+set generated_clock_files [concat \
+  [glob -nocomplain [file join $ip_shared_dir * ad_data_clk.v]] \
+  [glob -nocomplain [file join $ip_shared_dir * * ad_data_clk.v]]]
+set generated_lvds_files [concat \
+  [glob -nocomplain [file join $ip_shared_dir * axi_ad9361_lvds_if.v]] \
+  [glob -nocomplain [file join $ip_shared_dir * * axi_ad9361_lvds_if.v]]]
+if {[llength $generated_clock_files] != 1} {
+  error "Expected one generated ADI clock source in synthesis outputs under $ip_shared_dir; found: $generated_clock_files"
+}
+if {[llength $generated_lvds_files] != 1} {
+  error "Expected one generated AXI_AD9361 LVDS source in synthesis outputs under $ip_shared_dir; found: $generated_lvds_files"
+}
+set generated_clock_file [lindex $generated_clock_files 0]
+set generated_lvds_file [lindex $generated_lvds_files 0]
+set component_xml [file join $candidate_dir frs_clg400_frs.gen sources_1 bd system ip system_axi_ad9361_0 system_axi_ad9361_0.xml]
+if {![file isfile $component_xml]} {
+  error "Generated AXI_AD9361 synthesis metadata is missing: $component_xml"
+}
+set xml_fd [open $component_xml r]
+set component_description [read $xml_fd]
+close $xml_fd
+foreach generated_source [list $generated_clock_file $generated_lvds_file] {
+  set source_relative [string range $generated_source [expr {[string length $ip_shared_dir] + 1}] end]
+  set metadata_reference "../../ipshared/$source_relative"
+  if {[string first $metadata_reference $component_description] < 0} {
+    error "Generated AXI_AD9361 metadata does not reference synthesis source $generated_source"
+  }
+}
+set clock_fd [open $generated_clock_file r]
+set clock_source [read $clock_fd]
+close $clock_fd
+set lvds_fd [open $generated_lvds_file r]
+set lvds_source [read $lvds_fd]
+close $lvds_fd
+set bufio_count [regexp -all -- {(?m)^\s*BUFIO\s+i_rx_clk_bufio\s*\(} $clock_source]
+set clk_io_port_count [regexp -all -- {(?m)^\s*output\s+clk_io\s*\);} $clock_source]
+set rx_clk_io_count [regexp -all -- {\.rx_clk\s*\(\s*l_clk_io\s*\)} $lvds_source]
+set stale_rx_clk_count [regexp -all -- {\.rx_clk\s*\(\s*l_clk\s*\)} $lvds_source]
+if {$bufio_count != 1 || $clk_io_port_count != 1 ||
+    $rx_clk_io_count != 2 || $stale_rx_clk_count != 0} {
+  error "Generated AXI_AD9361 sources do not use the required BUFIO RX capture clock: BUFIO=$bufio_count clk_io_ports=$clk_io_port_count RX_l_clk_io=$rx_clk_io_count RX_l_clk=$stale_rx_clk_count"
+}
+puts "Verified generated AXI_AD9361 RX IDDRs use the BUFIO capture clock."
 update_compile_order -fileset sources_1
 
 # Disable the unrelated ZC702 package-pin map, retain the CLG400 board pins,
@@ -144,6 +205,13 @@ set zc702_xdcs [get_files -all -quiet -filter {NAME =~ "*projects/common/zc702/z
 if {[llength $zc702_xdcs] != 1} { error "Expected one generic ZC702 XDC." }
 set_property IS_ENABLED false $zc702_xdcs
 set timing_xdc [file join $script_dir clg400_ad936x_provisional_io_timing.xdc]
+# Repeated candidate generation may retain the timing XDC in the saved project.
+# Remove only this named constraint file, if present, before adding the current
+# copy; all unrelated constraints remain untouched.
+set stale_timing_xdcs [get_files -all -quiet -filter {NAME =~ "*clg400_ad936x_provisional_io_timing.xdc"}]
+if {[llength $stale_timing_xdcs]} {
+  remove_files $stale_timing_xdcs
+}
 add_files -fileset constrs_1 -norecurse $timing_xdc
 set timing_file [get_files -all -quiet $timing_xdc]
 set_property IS_ENABLED true $timing_file

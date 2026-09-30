@@ -126,8 +126,10 @@ module frs_ad9361_dma_bridge #(
         .drop_event(input_drop)
     );
 
-    always @(posedge adc_clk or negedge adc_resetn) begin
-        if (!adc_resetn)
+    // Keep every ADC-domain state element on the local reset, whose assertion
+    // is asynchronous but whose release is synchronized to adc_clk above.
+    always @(posedge adc_clk or negedge adc_domain_resetn) begin
+        if (!adc_domain_resetn)
             pair_mismatch_sticky <= 1'b0;
         else if (pair_mismatch)
             pair_mismatch_sticky <= 1'b1;

@@ -1,8 +1,15 @@
 name: Vivado FRS routed builds
 
 on:
-  # Never execute repository code on the licensed desktop for pushes or PRs.
-  # Select an explicitly reviewed branch and type its dispatch SHA below.
+  # Temporary, branch-scoped trigger so this exact reviewed PR revision can be
+  # routed before the workflow lands on main. The protected environment remains
+  # an explicit approval gate before code reaches the licensed runner.
+  push:
+    branches: [codex/vivado-pr-trigger-and-bufio-fix]
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  # Keep a manual route option for reviewed non-PR branches.
   workflow_dispatch:
     inputs:
       confirm_sha:
@@ -20,6 +27,13 @@ concurrency:
 jobs:
   route-both-profiles:
     name: Route live-RX and synthetic-IQ profiles
+    # Do not run fork PRs or PRs from anyone other than the repository owner.
+    # pull_request_target is used so this job policy comes from the base branch,
+    # not a workflow file modified by the PR itself.
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.user.login == 'graniteset')
     runs-on: [self-hosted, Linux, X64, vivado]
     environment: vivado-ooc
     timeout-minutes: 240
@@ -27,30 +41,76 @@ jobs:
       VIVADO_BIN: /opt/Xilinx/2026.1/Vivado/bin/vivado
     steps:
       - name: Verify the explicitly selected reviewed branch and commit
+        id: verify
         shell: bash
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           CONFIRM_SHA: ${{ inputs.confirm_sha }}
+          DISPATCH_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REF_TYPE" == "branch" ]] || {
-            echo "Only an explicitly selected branch is permitted." >&2
+          if [[ "$EVENT_NAME" == pull_request_target ]]; then
+            [[ "$PR_HEAD_REPOSITORY" == "$REPOSITORY" ]] || {
+              echo "Fork pull requests are not allowed on the Vivado runner." >&2
+              exit 1
+            }
+            [[ "$PR_AUTHOR" == graniteset ]] || {
+              echo "Only repository-owner-authored pull requests are allowed." >&2
+              exit 1
+            }
+            target_sha="$PR_HEAD_SHA"
+            echo "Approved same-repository PR head: $target_sha"
+          elif [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$GITHUB_REF_TYPE" == "branch" ]] || {
+              echo "Only an explicitly selected branch is permitted." >&2
+              exit 1
+            }
+            [[ "$CONFIRM_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || {
+              echo "confirm_sha must be a full 40-character commit SHA." >&2
+              exit 1
+            }
+            [[ "${CONFIRM_SHA,,}" == "${DISPATCH_SHA,,}" ]] || {
+              echo "Typed SHA does not match the selected workflow_dispatch commit." >&2
+              exit 1
+            }
+            target_sha="$DISPATCH_SHA"
+            echo "Selected ref: $GITHUB_REF"
+          elif [[ "$EVENT_NAME" == push && "$GITHUB_REF" == "refs/heads/codex/vivado-pr-trigger-and-bufio-fix" ]]; then
+            target_sha="$DISPATCH_SHA"
+            echo "Building the exact pushed commit on the explicitly allowlisted PR branch: $target_sha"
+          else
+            echo "Unsupported event/ref for a licensed Vivado build." >&2
+            exit 1
+          fi
+          [[ "$target_sha" =~ ^[0-9a-fA-F]{40}$ ]] || {
+            echo "Target must be a full 40-character commit SHA." >&2
             exit 1
           }
-          [[ "$CONFIRM_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || {
-            echo "confirm_sha must be a full 40-character commit SHA." >&2
-            exit 1
-          }
-          [[ "${CONFIRM_SHA,,}" == "${GITHUB_SHA,,}" ]] || {
-            echo "Typed SHA does not match the selected workflow_dispatch commit." >&2
-            exit 1
-          }
-          echo "Selected ref: $GITHUB_REF"
-          echo "Selected commit: $GITHUB_SHA"
+          echo "target_sha=${target_sha,,}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          # Check out exactly the immutable PR head SHA, not a moving branch or
+          # the pull_request_target base SHA / synthetic merge ref.
+          ref: ${{ steps.verify.outputs.target_sha }}
           persist-credentials: false
+
+      - name: Verify exact source checkout
+        shell: bash
+        env:
+          TARGET_SHA: ${{ steps.verify.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          [[ "${actual,,}" == "${TARGET_SHA,,}" ]] || {
+            echo "Checked-out commit $actual differs from approved target $TARGET_SHA." >&2
+            exit 1
+          }
+          echo "Building exact reviewed source commit $actual"
 
       - name: Verify Vivado installation
         shell: bash
@@ -139,6 +199,7 @@ jobs:
             if python3 ci/check_vivado_route_reports.py \
                 --timing "$profile_dir/reports/frs_impl_timing.rpt" \
                 --drc "$profile_dir/reports/frs_impl_drc.rpt" \
+                --constraints fpga/plutosky_r2/clg400_ad936x_provisional_io_timing.xdc \
                 --summary "$profile_dir/timing-gate.txt"; then
               echo "Routed timing/DRC gates passed for $profile." | tee "$profile_dir/result.txt"
             else
@@ -156,7 +217,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vivado-frs-route-${{ github.run_id }}-${{ github.sha }}
+          name: vivado-frs-route-${{ github.run_id }}-${{ steps.verify.outputs.target_sha }}
           path: work/vivado-frs-route/
           if-no-files-found: warn
           retention-days: 30
